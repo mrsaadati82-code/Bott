@@ -1,0 +1,11 @@
+# ============================================================
+# Bot Builder SaaS - Bale Messenger
+# Dependencies (Pydroid 3 / Termux / VPS compatible)
+# ============================================================
+# Only pure-python or lightweight deps to keep Pydroid 3 happy.
+
+requests>=2.28.0
+# sqlite3 is built into Python stdlib - no extra install needed
+
+# Optional (for future PostgreSQL migration). Commented out by default.
+# psycopg2-binary>=2.9.0

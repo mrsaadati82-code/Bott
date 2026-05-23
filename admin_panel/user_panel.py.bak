@@ -1,0 +1,1115 @@
+# ============================================================
+# admin_panel/user_panel.py
+# ============================================================
+# User-facing handlers with wizard-style, inline-button UX.
+# ============================================================
+
+import json
+
+from core.router import mother_router
+from core.keyboards import reply_keyboard, inline, remove_keyboard
+from core.state_manager import state_manager, text_input_bus
+from core.bot_manager import bot_manager
+from core.updater import BaleAPI
+
+from database.db import db
+
+from subscriptions.subscription_manager import check_can_create_bot
+from subscriptions.plan_manager import list_plans, get_plan
+from wallet.wallet_manager import (
+    get_balance, list_transactions, redeem_gift_code,
+)
+from payments.payment_manager import (
+    start_subscription_purchase, start_wallet_topup,
+    list_enabled_methods, get_method, notify_receipt_submitted,
+)
+from payments import wallet_gateway
+from page_builder import page_manager
+from flow_engine import flow_manager
+from channel_lock import channel_checker
+from templates import template_registry
+
+
+# ============================================================
+# Labels
+# ============================================================
+BTN_NEW_BOT          = "🤖 ساخت ربات"
+BTN_NEW_BOT_FROM_TPL = "🎁 ساخت ربات از Template"
+BTN_MY_BOTS          = "🗂 ربات‌های من"
+BTN_WALLET           = "💰 کیف پول"
+BTN_PLANS            = "📦 پلن‌ها"
+BTN_INVITE           = "🎯 دعوت دوستان"
+BTN_GIFT             = "🎁 ثبت کد هدیه"
+BTN_SUPPORT          = "📞 پشتیبانی"
+BTN_HELP             = "❓ راهنما"
+
+USER_MAIN_KB = reply_keyboard([
+    [BTN_NEW_BOT_FROM_TPL, BTN_NEW_BOT],
+    [BTN_MY_BOTS],
+    [BTN_WALLET, BTN_PLANS],
+    [BTN_INVITE, BTN_GIFT],
+    [BTN_SUPPORT, BTN_HELP],
+])
+
+
+# ============================================================
+# Helpers
+# ============================================================
+def _owner_id(ctx) -> int:
+    return int(ctx.db_user_id)
+
+
+def _money(n: int) -> str:
+    return "{:,} ریال".format(int(n))
+
+
+def _user_bots(owner_id: int):
+    return db.fetchall(
+        "SELECT * FROM bots WHERE owner_id=? ORDER BY id DESC", (int(owner_id),)
+    )
+
+
+def _get_bot_for_owner(bot_id: int, owner_id: int):
+    return db.fetchone(
+        "SELECT * FROM bots WHERE id=? AND owner_id=?",
+        (int(bot_id), int(owner_id)),
+    )
+
+
+def _payment_methods_kb(prefix: str, amount: int, extra_args: str = "",
+                        user_id: int = None) -> dict:
+    """
+    Build a SMART method picker for payments.
+    - Wallet method appears FIRST if user has enough balance.
+    - If wallet exists but insufficient, shows it disabled with hint.
+    """
+    methods = list_enabled_methods()
+    wallet_bal = get_balance(user_id) if user_id else 0
+    rows = []
+
+    # Wallet method - smart placement
+    for m in methods:
+        if m["key"] == "wallet":
+            if wallet_bal >= amount:
+                label = "💰 پرداخت از کیف پول ({})".format(_money(wallet_bal))
+                rows.append([(label, "{}:{}:wallet:{}".format(prefix, extra_args, amount))
+                             if extra_args
+                             else (label, "{}:wallet:{}".format(prefix, amount))])
+            # if not enough, skip - we'll add a hint at bottom
+            break
+
+    # Other methods
+    for m in methods:
+        if m["key"] == "wallet":
+            continue
+        label = m["name"]
+        cb = ("{}:{}:{}:{}".format(prefix, extra_args, m["key"], amount)
+              if extra_args else "{}:{}:{}".format(prefix, m["key"], amount))
+        rows.append([(label, cb)])
+
+    # If wallet too low, show topup shortcut
+    if user_id is not None and wallet_bal < amount:
+        shortage = amount - wallet_bal
+        rows.append([(
+            "💼 شارژ سریع {} (موجودی شما: {})".format(_money(shortage), _money(wallet_bal)),
+            "wt:quick:{}".format(shortage),
+        )])
+
+    rows.append([("🔙 لغو", "cancel:main")])
+    return inline(rows)
+
+
+# ============================================================
+# Setup
+# ============================================================
+def setup():
+
+    # --------------------------------------------------------
+    # HOME / CANCEL
+    # --------------------------------------------------------
+    @mother_router.text("🏠 صفحه اصلی")
+    def _home(ctx):
+        ctx.reply("منوی اصلی:", reply_markup=USER_MAIN_KB)
+
+    @mother_router.command("cancel")
+    def _cancel(ctx):
+        state_manager.clear(ctx.bot_id, ctx.user_id)
+        ctx.reply("لغو شد.", reply_markup=USER_MAIN_KB)
+
+    @mother_router.callback("cancel:")
+    def _cancel_cb(ctx):
+        state_manager.clear(ctx.bot_id, ctx.user_id)
+        ctx.answer_callback("لغو شد")
+        ctx.reply("منوی اصلی:", reply_markup=USER_MAIN_KB)
+
+    # --------------------------------------------------------
+    # WALLET
+    # --------------------------------------------------------
+    @mother_router.text(BTN_WALLET)
+    def _wallet_btn(ctx):
+        bal = get_balance(_owner_id(ctx))
+        txs = list_transactions(_owner_id(ctx), limit=5)
+        text = "👛 موجودی شما: <b>{}</b>\n\n".format(_money(bal))
+        if txs:
+            text += "📑 آخرین تراکنش‌ها:\n"
+            for t in txs:
+                sign = "➕" if t["amount"] > 0 else "➖"
+                text += "{} {:,} | {} | {}\n".format(
+                    sign, abs(t["amount"]), t["type"], t["created_at"][:16]
+                )
+        else:
+            text += "هنوز تراکنشی ثبت نشده."
+        kb = inline([
+            [("💳 شارژ کیف پول", "wt:start:0")],
+            [("🎁 ثبت کد هدیه",  "wt:gift:0")],
+            [("🔄 رفرش",         "wt:refresh:0")],
+        ])
+        ctx.reply(text, reply_markup=kb, parse_mode="HTML")
+
+    @mother_router.callback("wt:")
+    def _wt_cb(ctx):
+        parts = ctx.data.split(":")
+        action = parts[1]
+        ctx.answer_callback()
+        if action == "refresh":
+            _wallet_btn(ctx)
+        elif action == "start":
+            kb = inline([
+                [("50,000 ریال",  "wt:amt:50000")],
+                [("100,000 ریال", "wt:amt:100000")],
+                [("200,000 ریال", "wt:amt:200000")],
+                [("500,000 ریال", "wt:amt:500000")],
+                [("✏️ مبلغ دلخواه", "wt:custom:0")],
+                [("🔙 بازگشت",       "wt:refresh:0")],
+            ])
+            ctx.reply("💳 مبلغ شارژ را انتخاب کنید:", reply_markup=kb)
+        elif action == "custom":
+            state_manager.set(ctx.bot_id, ctx.user_id, "user:wallet:topup", {})
+            ctx.reply("✏️ مبلغ دلخواه (ریال) را ارسال کنید:\n/cancel برای انصراف")
+        elif action == "amt":
+            amount = int(parts[2])
+            _show_topup_methods(ctx, amount)
+        elif action == "quick":
+            # Quick topup with exact shortage amount
+            amount = int(parts[2])
+            _show_topup_methods(ctx, amount)
+        elif action == "gift":
+            state_manager.set(ctx.bot_id, ctx.user_id, "user:gift:code", {})
+            ctx.reply("🎁 کد هدیه خود را ارسال کنید:\n/cancel برای انصراف")
+        elif action == "pay":
+            # wt:pay:<method>:<amount>
+            method = parts[2]
+            amount = int(parts[3])
+            _do_wallet_topup_payment(ctx, method, amount)
+
+    def _show_topup_methods(ctx, amount: int):
+        methods = list_enabled_methods()
+        # Topup itself can't use wallet method
+        methods = [m for m in methods if m["key"] != "wallet"]
+        if not methods:
+            ctx.reply("❌ هیچ روش پرداختی فعال نیست."); return
+        rows = []
+        for m in methods:
+            rows.append([(m["name"], "wt:pay:{}:{}".format(m["key"], amount))])
+        rows.append([("🔙 لغو", "wt:refresh:0")])
+        ctx.reply(
+            "💳 مبلغ: <b>{}</b>\nروش پرداخت را انتخاب کنید:".format(_money(amount)),
+            reply_markup=inline(rows), parse_mode="HTML",
+        )
+
+    def _do_wallet_topup_payment(ctx, method: str, amount: int):
+        p = start_wallet_topup(_owner_id(ctx), amount, method)
+        if method == "card_to_card":
+            from payments.card_to_card import get_card_text
+            state_manager.set(ctx.bot_id, ctx.user_id, "user:c2c:photo",
+                              {"payment_id": p["id"]})
+            ctx.reply(
+                "🧾 پرداخت #{id} ثبت شد.\n\n{card}".format(id=p["id"], card=get_card_text()),
+                parse_mode="HTML",
+            )
+        elif method == "online":
+            from payments.online_gateway import request_payment
+            r = request_payment(amount=amount, description="شارژ کیف پول")
+            ctx.reply(
+                "🔗 لینک پرداخت:\n{url}\n\nشناسه پرداخت: #{id}".format(
+                    url=r["redirect_url"], id=p["id"]
+                )
+            )
+        elif method == "bale":
+            ctx.reply(
+                "💳 پرداخت داخلی بله #{} ثبت شد.\n"
+                "(فعال‌سازی توسط مدیر سیستم).".format(p["id"])
+            )
+
+    @text_input_bus.on("user:wallet:topup")
+    def _on_wallet_custom_amount(ctx):
+        s = (ctx.text or "").strip()
+        if not s.isdigit() or int(s) < 1000:
+            ctx.reply("❌ مبلغ باید عدد و حداقل 1,000 ریال باشد.")
+            return
+        state_manager.clear(ctx.bot_id, ctx.user_id)
+        _show_topup_methods(ctx, int(s))
+
+    @text_input_bus.on("user:gift:code")
+    def _on_gift_redeem(ctx):
+        code = (ctx.text or "").strip().upper()
+        state_manager.clear(ctx.bot_id, ctx.user_id)
+        r = redeem_gift_code(_owner_id(ctx), code)
+        ctx.reply(r["message"], reply_markup=USER_MAIN_KB)
+        if r.get("ok"):
+            _wallet_btn(ctx)
+
+    # --------------------------------------------------------
+    # CARD-TO-CART receipt: photo handler
+    # --------------------------------------------------------
+    @text_input_bus.on("user:c2c:photo")
+    def _on_c2c_photo(ctx):
+        # This handler runs for both photo updates and text updates
+        # because TextInputBus dispatches all updates matching state.
+        data = state_manager.get_data(ctx.bot_id, ctx.user_id)
+        payment_id = int(data.get("payment_id") or 0)
+
+        if ctx.photo_file_id:
+            from payments.card_to_card import attach_receipt_photo
+            attach_receipt_photo(payment_id, ctx.photo_file_id,
+                                 tracking_code=(ctx.caption or "").strip() or None)
+            state_manager.clear(ctx.bot_id, ctx.user_id)
+            notify_receipt_submitted(payment_id)
+            ctx.reply(
+                "✅ رسید شما دریافت شد.\n\n"
+                "🆔 شناسه پرداخت: #{}\n"
+                "⏳ پس از تایید توسط مدیر، نتیجه به شما اطلاع داده می‌شود.".format(payment_id),
+                reply_markup=USER_MAIN_KB,
+            )
+        elif ctx.text:
+            # If user sent text instead of photo, treat as tracking code
+            from payments.card_to_card import attach_receipt_text
+            attach_receipt_text(payment_id, ctx.text.strip())
+            ctx.reply(
+                "📝 شماره پیگیری ثبت شد.\n\n"
+                "👈 اکنون لطفاً <b>عکس رسید واریز</b> را هم ارسال کنید."
+                .format(payment_id), parse_mode="HTML",
+            )
+
+    # --------------------------------------------------------
+    # PLANS (inline list + buy flow)
+    # --------------------------------------------------------
+    @mother_router.text(BTN_PLANS)
+    def _plans_btn(ctx):
+        plans = list_plans(only_active=True)
+        if not plans:
+            ctx.reply("⚠️ در حال حاضر پلنی فعال نیست.", reply_markup=USER_MAIN_KB)
+            return
+        text = "📦 پلن‌های قابل خرید:\n\n"
+        kb = []
+        for p in plans:
+            text += "• {} — {} روز — <b>{}</b>\n".format(
+                p["name"], p["duration_days"], _money(p["price"])
+            )
+            kb.append([(p["name"], "buyp:open:{}".format(p["id"]))])
+        ctx.reply(text, reply_markup=inline(kb), parse_mode="HTML")
+
+    @mother_router.callback("buyp:")
+    def _buyp(ctx):
+        parts = ctx.data.split(":", 3)
+        action = parts[1]
+        ctx.answer_callback()
+        if action == "open":
+            plan_id = int(parts[2])
+            p = get_plan(plan_id)
+            if not p:
+                ctx.reply("پلن یافت نشد."); return
+            text = (
+                "📦 پلن: <b>{nm}</b>\n"
+                "{desc}\n\n"
+                "⏱ مدت: {d} روز\n"
+                "💰 قیمت: <b>{pr}</b>\n"
+                "🤖 max_bots: {mb}\n"
+                "👥 max_users: {mu}\n"
+                "💬 max_msg/ماه: {mm}\n\n"
+                "👇 روش پرداخت را انتخاب کنید:"
+            ).format(
+                nm=p["name"], desc=p.get("description") or "-",
+                d=p["duration_days"], pr=_money(p["price"]),
+                mb=p["max_bots"], mu=p["max_users_per_bot"], mm=p["max_monthly_messages"],
+            )
+            kb = _payment_methods_kb("buyp:pay", int(p["price"]),
+                                     extra_args=str(plan_id), user_id=_owner_id(ctx))
+            ctx.reply(text, reply_markup=kb, parse_mode="HTML")
+        elif action == "pay":
+            # buyp:pay:<plan_id>:<method>:<amount>
+            plan_id = int(parts[2])
+            method = parts[3]
+            p = get_plan(plan_id)
+            if not p:
+                ctx.reply("پلن یافت نشد."); return
+            _do_subscription_payment(ctx, p, method)
+
+    def _do_subscription_payment(ctx, plan: dict, method: str):
+        try:
+            payment = start_subscription_purchase(
+                user_id=_owner_id(ctx), plan_id=plan["id"],
+                amount=int(plan["price"]), method_key=method,
+            )
+        except ValueError as e:
+            if "insufficient" in str(e):
+                shortage = wallet_gateway.shortage(_owner_id(ctx), int(plan["price"]))
+                kb = inline([
+                    [("💼 شارژ سریع {}".format(_money(shortage)),
+                      "wt:quick:{}".format(shortage))],
+                    [("🔙 بازگشت", "buyp:open:{}".format(plan["id"]))],
+                ])
+                ctx.reply(
+                    "❌ موجودی کیف پول شما کافی نیست.\n\n"
+                    "💰 مبلغ پلن: {}\n"
+                    "💼 موجودی: {}\n"
+                    "💸 کسری: <b>{}</b>".format(
+                        _money(plan["price"]),
+                        _money(get_balance(_owner_id(ctx))),
+                        _money(shortage),
+                    ),
+                    reply_markup=kb, parse_mode="HTML",
+                )
+                return
+            ctx.reply("❌ خطا: {}".format(e)); return
+
+        # wallet method auto-approves - tell user immediately
+        if method == "wallet":
+            ctx.reply(
+                "✅ پرداخت از کیف پول با موفقیت انجام شد.\n"
+                "🎟 اشتراک «{}» فعال شد.".format(plan["name"]),
+                reply_markup=USER_MAIN_KB,
+            )
+            return
+
+        if method == "card_to_card":
+            from payments.card_to_card import get_card_text
+            state_manager.set(ctx.bot_id, ctx.user_id, "user:c2c:photo",
+                              {"payment_id": payment["id"]})
+            ctx.reply(
+                "🧾 پرداخت #{id} ثبت شد.\n\n{card}".format(
+                    id=payment["id"], card=get_card_text()
+                ),
+                parse_mode="HTML",
+            )
+        elif method == "online":
+            from payments.online_gateway import request_payment
+            r = request_payment(amount=int(plan["price"]),
+                                description="خرید پلن " + plan["name"])
+            ctx.reply("🔗 لینک پرداخت:\n{}\n\nشناسه: #{}".format(
+                r["redirect_url"], payment["id"]
+            ))
+        elif method == "bale":
+            ctx.reply(
+                "💳 پرداخت داخلی بله #{} ثبت شد.\n"
+                "(فعال‌سازی توسط مدیر سیستم).".format(payment["id"])
+            )
+
+    # --------------------------------------------------------
+    # GIFT shortcut
+    # --------------------------------------------------------
+    @mother_router.text(BTN_GIFT)
+    def _gift_btn(ctx):
+        state_manager.set(ctx.bot_id, ctx.user_id, "user:gift:code", {})
+        ctx.reply("🎁 کد هدیه خود را ارسال کنید:\n/cancel برای انصراف")
+
+    @mother_router.command("gift")
+    def _gift_cmd(ctx):
+        parts = (ctx.text or "").split()
+        if len(parts) != 2:
+            state_manager.set(ctx.bot_id, ctx.user_id, "user:gift:code", {})
+            ctx.reply("🎁 کد هدیه خود را ارسال کنید:")
+            return
+        r = redeem_gift_code(_owner_id(ctx), parts[1])
+        ctx.reply(r["message"])
+
+    # --------------------------------------------------------
+    # /receipt LEGACY support
+    # --------------------------------------------------------
+    @mother_router.command("receipt")
+    def _receipt(ctx):
+        from payments.card_to_card import attach_receipt_text
+        parts = (ctx.text or "").split(maxsplit=2)
+        if len(parts) < 3 or not parts[1].isdigit():
+            ctx.reply(
+                "💡 نیازی به این دستور نیست!\n"
+                "کافیست عکس رسید را همینجا برای ربات بفرستید."
+            )
+            return
+        try:
+            attach_receipt_text(int(parts[1]), parts[2])
+            notify_receipt_submitted(int(parts[1]))
+            ctx.reply("✅ شماره پیگیری ثبت شد. لطفاً عکس رسید را هم بفرستید.")
+        except Exception as e:
+            ctx.reply("❌ خطا: {}".format(e))
+
+    # ========================================================
+    # CREATE BOT (Wizard with full guidance)
+    # ========================================================
+    @mother_router.text(BTN_NEW_BOT)
+    def _new_bot_start(ctx):
+        _start_wizard(ctx, template=None)
+
+    @mother_router.callback("nb:")
+    def _nb_cb(ctx):
+        action = ctx.data.split(":", 2)[1]
+        ctx.answer_callback()
+        if action == "step1":
+            _wizard_step1(ctx)
+        elif action == "step2":
+            _wizard_step2(ctx)
+        elif action == "cancel":
+            state_manager.clear(ctx.bot_id, ctx.user_id)
+            ctx.reply("لغو شد.", reply_markup=USER_MAIN_KB)
+
+    def _start_wizard(ctx, template=None):
+        chk = check_can_create_bot(_owner_id(ctx))
+        if not chk["ok"]:
+            ctx.reply(
+                chk["message"] + "\n\n💡 ابتدا از «📦 پلن‌ها» یک پلن خریداری کنید.",
+                reply_markup=USER_MAIN_KB,
+            )
+            return
+        # save template choice (may be None) into state
+        state_manager.set(ctx.bot_id, ctx.user_id, "user:wizard:intro",
+                          {"template": template})
+        intro = (
+            "🤖 <b>ساخت ربات جدید — راهنمای مرحله به مرحله</b>\n\n"
+            "نگران نباشید! فقط ۳ مرحله ساده دارد:\n\n"
+            "🔹 <b>مرحله ۱</b>: ساخت ربات در بله (با @botfather)\n"
+            "🔹 <b>مرحله ۲</b>: کپی توکن ربات\n"
+            "🔹 <b>مرحله ۳</b>: ارسال توکن به همینجا\n\n"
+            "آماده‌اید؟"
+        )
+        kb = inline([
+            [("✅ بله، شروع کنیم", "nb:step1")],
+            [("❌ نه، فعلاً نمی‌خواهم", "nb:cancel")],
+        ])
+        ctx.reply(intro, reply_markup=kb, parse_mode="HTML")
+
+    def _wizard_step1(ctx):
+        text = (
+            "📌 <b>مرحله ۱ از ۳: ساخت ربات در @botfather</b>\n\n"
+            "1️⃣ روی لینک زیر بزنید تا وارد ربات BotFather شوید:\n"
+            "👉 https://ble.ir/botfather\n\n"
+            "2️⃣ در آنجا روی <b>/start</b> یا <b>/newbot</b> بزنید.\n\n"
+            "3️⃣ یک <b>اسم</b> برای ربات خود انتخاب کنید (مثل: «فروشگاه من»).\n\n"
+            "4️⃣ یک <b>یوزرنیم</b> برای ربات بدهید که با <code>_bot</code> ختم شود "
+            "(مثل: <code>myshop_bot</code>).\n\n"
+            "✅ وقتی این کارها را انجام دادید، دکمه پایین را بزنید."
+        )
+        kb = inline([
+            [("✅ ربات را ساختم", "nb:step2")],
+            [("❌ انصراف", "nb:cancel")],
+        ])
+        ctx.reply(text, reply_markup=kb, parse_mode="HTML")
+
+    def _wizard_step2(ctx):
+        text = (
+            "📌 <b>مرحله ۲ از ۳: کپی توکن</b>\n\n"
+            "حالا BotFather یک پیام برای شما فرستاده که شامل یک کد طولانی است.\n"
+            "این کد <b>توکن ربات</b> شماست و شبیه این است:\n\n"
+            "<code>123456789:abcDefGhiJklMnoPqrStuVwxYz_0123456</code>\n\n"
+            "🔹 توکن را به‌طور <b>کامل</b> کپی کنید.\n"
+            "🔹 آن را به همین چت ارسال کنید 👇\n\n"
+            "/cancel برای انصراف"
+        )
+        # set state to receive token
+        data = state_manager.get_data(ctx.bot_id, ctx.user_id)
+        state_manager.set(ctx.bot_id, ctx.user_id, "user:newbot:token", data)
+        ctx.reply(text, parse_mode="HTML", reply_markup=remove_keyboard())
+
+    # --------------------------------------------------------
+    # FROM TEMPLATE - uses same wizard at the end
+    # --------------------------------------------------------
+    @mother_router.text(BTN_NEW_BOT_FROM_TPL)
+    def _new_from_tpl(ctx):
+        tpls = template_registry.list_published_templates()
+        if not tpls:
+            ctx.reply("هیچ Template ای در دسترس نیست.")
+            return
+        text = (
+            "🎁 <b>ساخت ربات از Template</b>\n\n"
+            "Templateها ربات‌های آماده‌ای هستند که فقط با چند کلیک می‌توانید بسازید.\n"
+            "صفحات و گفت‌وگوها از قبل برایتان طراحی شده‌اند 🎨\n\n"
+            "یک Template را انتخاب کنید 👇"
+        )
+        rows = []
+        for t in tpls:
+            meta = template_registry.get(t["key"])
+            if not meta:
+                continue
+            plans = template_registry.list_plans_for_template(t["key"])
+            cheapest = min((p["price"] for p in plans), default=0)
+            label = "{} {} - از {}".format(meta.icon, meta.name, _money(cheapest))
+            rows.append([(label, "utpl:open:{}".format(t["key"]))])
+        ctx.reply(text, reply_markup=inline(rows), parse_mode="HTML")
+
+    @mother_router.callback("utpl:")
+    def _utpl_cb(ctx):
+        parts = ctx.data.split(":", 3)
+        action = parts[1]
+        ctx.answer_callback()
+
+        if action == "open" and len(parts) >= 3:
+            key = parts[2]
+            meta = template_registry.get(key)
+            if not meta:
+                ctx.reply("Template یافت نشد.")
+                return
+            plans = template_registry.list_plans_for_template(key)
+            text = "{} <b>{}</b> v{}\n{}\n\n📦 پلن‌ها:\n".format(
+                meta.icon, meta.name, meta.version, meta.description
+            )
+            rows = []
+            for p in plans:
+                rows.append([(
+                    "{} - {}".format(p["name"], _money(p["price"])),
+                    "utpl:plan:{}:{}".format(key, p["id"])
+                )])
+            rows.append([("🔙 لیست Template", "utpl:list:0")])
+            ctx.reply(text, reply_markup=inline(rows), parse_mode="HTML")
+            return
+
+        if action == "list":
+            _new_from_tpl(ctx); return
+
+        if action == "plan" and len(parts) >= 4:
+            tpl_key = parts[2]
+            plan_id = int(parts[3])
+            p = get_plan(plan_id)
+            meta = template_registry.get(tpl_key)
+            if not p or not meta:
+                ctx.reply("پلن یافت نشد."); return
+            text = (
+                "{ic} <b>{nm}</b> — پلن <b>{pn}</b>\n\n"
+                "⏱ {d} روز\n"
+                "💰 <b>{pr}</b>\n\n"
+                "روش پرداخت را انتخاب کنید 👇"
+            ).format(ic=meta.icon, nm=meta.name, pn=p["name"],
+                     d=p["duration_days"], pr=_money(p["price"]))
+            # store choice for after payment
+            state_manager.set(
+                ctx.bot_id, ctx.user_id, "user:utpl:choice",
+                {"tpl_key": tpl_key, "plan_id": plan_id},
+            )
+            kb = _payment_methods_kb(
+                "utpl:pay", int(p["price"]),
+                extra_args="{}_{}".format(tpl_key, plan_id),
+                user_id=_owner_id(ctx),
+            )
+            ctx.reply(text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        if action == "pay" and len(parts) >= 4:
+            # utpl:pay:<tpl_key>_<plan_id>:<method>:<amount>
+            tpl_plan = parts[2]
+            method = parts[3].split(":")[0]
+            try:
+                tpl_key, plan_id = tpl_plan.rsplit("_", 1)
+                plan_id = int(plan_id)
+            except Exception:
+                ctx.reply("داده‌های نامعتبر."); return
+            p = get_plan(plan_id)
+            if not p:
+                ctx.reply("پلن یافت نشد."); return
+
+            try:
+                payment = start_subscription_purchase(
+                    user_id=_owner_id(ctx), plan_id=plan_id,
+                    amount=int(p["price"]), method_key=method,
+                    meta={"tpl_key": tpl_key},
+                )
+            except ValueError as e:
+                if "insufficient" in str(e):
+                    shortage = wallet_gateway.shortage(_owner_id(ctx), int(p["price"]))
+                    kb = inline([
+                        [("💼 شارژ سریع {}".format(_money(shortage)),
+                          "wt:quick:{}".format(shortage))],
+                        [("🔙 بازگشت", "utpl:plan:{}:{}".format(tpl_key, plan_id))],
+                    ])
+                    ctx.reply(
+                        "❌ موجودی کافی نیست.\n"
+                        "💼 موجودی: {}\n💸 کسری: {}".format(
+                            _money(get_balance(_owner_id(ctx))), _money(shortage),
+                        ),
+                        reply_markup=kb,
+                    )
+                    return
+                ctx.reply("❌ خطا: {}".format(e)); return
+
+            # Wallet method already approved
+            if method == "wallet":
+                # Start the bot-creation wizard immediately
+                ctx.reply(
+                    "✅ پرداخت از کیف پول انجام شد.\n"
+                    "🎟 اشتراک فعال شد.\n\n"
+                    "حالا توکن ربات را آماده کنیم 👇"
+                )
+                _start_wizard(ctx, template=tpl_key)
+                return
+
+            if method == "card_to_card":
+                from payments.card_to_card import get_card_text
+                state_manager.set(ctx.bot_id, ctx.user_id, "user:c2c:photo",
+                                  {"payment_id": payment["id"]})
+                ctx.reply(
+                    "🧾 پرداخت #{id} ثبت شد.\n\n{card}\n\n"
+                    "💡 پس از تایید پرداخت، می‌توانید توکن ربات خود را ارسال کنید."
+                    .format(id=payment["id"], card=get_card_text()),
+                    parse_mode="HTML",
+                )
+                # remember template for after approval
+                state_manager.update_data(ctx.bot_id, ctx.user_id,
+                                          pending_template=tpl_key)
+                return
+            if method == "online":
+                from payments.online_gateway import request_payment
+                r = request_payment(amount=int(p["price"]),
+                                    description="خرید پلن " + p["name"])
+                ctx.reply("🔗 لینک پرداخت:\n{}\n\nشناسه: #{}".format(
+                    r["redirect_url"], payment["id"]))
+                return
+            if method == "bale":
+                ctx.reply("💳 پرداخت بله #{} ثبت شد.".format(payment["id"]))
+                return
+
+    # --------------------------------------------------------
+    # MY BOTS
+    # --------------------------------------------------------
+    @mother_router.text(BTN_MY_BOTS)
+    def _my_bots(ctx):
+        rows = _user_bots(_owner_id(ctx))
+        if not rows:
+            ctx.reply(
+                "هنوز ربات نساخته‌اید 🤖\n\n"
+                "از «🎁 ساخت ربات از Template» یک ربات آماده بسازید (پیشنهاد می‌شود).",
+                reply_markup=USER_MAIN_KB,
+            )
+            return
+        kb = []
+        for b in rows:
+            label = "🤖 @{} - {}".format(b.get("bot_username") or "?", b["status"])
+            kb.append([(label, "mb:open:{}".format(b["id"]))])
+        ctx.reply("ربات‌های شما ({}):".format(len(rows)), reply_markup=inline(kb))
+
+    @mother_router.callback("mb:")
+    def _my_bots_cb(ctx):
+        parts = ctx.data.split(":", 3)
+        action = parts[1]
+        bot_id = int(parts[2]) if len(parts) > 2 else None
+        owner_id = _owner_id(ctx)
+        b = _get_bot_for_owner(bot_id, owner_id) if bot_id else None
+        if action == "open" and b:
+            ctx.answer_callback()
+            _show_bot_dashboard(ctx, b)
+        elif action == "delete" and b:
+            ctx.answer_callback("حذف شد")
+            bot_manager.stop_bot(b["id"])
+            db.execute("DELETE FROM bots WHERE id=?", (b["id"],))
+            ctx.reply("🗑 ربات حذف شد.", reply_markup=USER_MAIN_KB)
+        elif action == "pause" and b:
+            new = "paused" if b["status"] == "active" else "active"
+            db.execute("UPDATE bots SET status=? WHERE id=?", (new, b["id"]))
+            if new == "paused":
+                bot_manager.stop_bot(b["id"])
+            else:
+                bot_manager.start_child(_get_bot_for_owner(b["id"], owner_id))
+            ctx.answer_callback("به‌روزرسانی شد")
+            _show_bot_dashboard(ctx, _get_bot_for_owner(b["id"], owner_id))
+        elif action == "stats" and b:
+            from monitoring.analytics import per_bot_stats
+            s = per_bot_stats(b["id"])
+            ctx.answer_callback()
+            ctx.reply(
+                "📊 آمار ربات #{id}\n"
+                "وضعیت: {st}\n"
+                "اشتراک‌های فعال: {sub}".format(
+                    id=s["id"], st=s["status"], sub=s["active_subscriptions"],
+                )
+            )
+
+    def _show_bot_dashboard(ctx, b: dict):
+        pages = page_manager.list_pages(b["id"])
+        flows = flow_manager.list_flows(b["id"])
+        locks = channel_checker.list_channels(b["id"])
+        tpl_name = "-"
+        if b.get("template_id"):
+            tpl_row = db.fetchone("SELECT name FROM bot_templates WHERE id=?",
+                                  (int(b["template_id"]),))
+            if tpl_row:
+                tpl_name = tpl_row["name"]
+        text = (
+            "🤖 <b>@{user}</b>\n"
+            "📡 وضعیت: {st}\n"
+            "🧩 Template: {tpl}\n"
+            "📄 صفحات: {pg}\n"
+            "🌊 Flowها: {fl}\n"
+            "🔒 کانال‌های اجباری: {lk}"
+        ).format(
+            user=b.get("bot_username") or "?",
+            st=b["status"], tpl=tpl_name,
+            pg=len(pages), fl=len(flows), lk=len(locks),
+        )
+        kb = inline([
+            [("📄 صفحات",     "pg:list:{}".format(b["id"])),
+             ("🌊 Flow",      "fl:list:{}".format(b["id"]))],
+            [("🔒 کانال",     "cl:list:{}".format(b["id"])),
+             ("📊 آمار",      "mb:stats:{}".format(b["id"]))],
+            [("⏸ توقف/شروع", "mb:pause:{}".format(b["id"])),
+             ("🗑 حذف",       "mb:delete:{}".format(b["id"]))],
+        ])
+        ctx.reply(text, reply_markup=kb, parse_mode="HTML")
+
+    # --------------------------------------------------------
+    # PAGES CRUD
+    # --------------------------------------------------------
+    @mother_router.callback("pg:")
+    def _pages_cb(ctx):
+        parts = ctx.data.split(":", 3)
+        action = parts[1]
+        bot_id = int(parts[2])
+        b = _get_bot_for_owner(bot_id, _owner_id(ctx))
+        if not b:
+            ctx.answer_callback("⛔", show_alert=True); return
+        ctx.answer_callback()
+
+        if action == "list":
+            pages = page_manager.list_pages(bot_id)
+            txt = "📄 صفحات ربات #{}:\n\n".format(bot_id)
+            if pages:
+                start = page_manager.get_start_page(bot_id)
+                for p in pages:
+                    mark = " ⭐" if p == start else ""
+                    txt += "• {}{}\n".format(p, mark)
+            else:
+                txt += "(خالی)"
+            kb = inline([
+                [("➕ صفحه جدید", "pg:new:{}".format(bot_id))],
+                [("✏️ ویرایش", "pg:edit:{}".format(bot_id)),
+                 ("🗑 حذف", "pg:del:{}".format(bot_id))],
+                [("🏠 صفحه شروع", "pg:start:{}".format(bot_id))],
+            ])
+            ctx.reply(txt, reply_markup=kb)
+        elif action == "new":
+            state_manager.set(ctx.bot_id, ctx.user_id, "user:newpage:name",
+                              {"bot_id": bot_id})
+            ctx.reply("نام صفحه جدید را ارسال کنید (مثلاً home):")
+        elif action in ("edit", "del", "start"):
+            pages = page_manager.list_pages(bot_id)
+            if not pages:
+                ctx.reply("صفحه‌ای وجود ندارد."); return
+            prefix = {"edit": "pgE", "del": "pgD", "start": "pgS"}[action]
+            rows = [[(p, "{}:{}:{}".format(prefix, bot_id, p))] for p in pages]
+            ctx.reply("یک صفحه انتخاب کنید:", reply_markup=inline(rows))
+
+    @mother_router.callback("pgE:")
+    def _pgE(ctx):
+        _, bot_id, name = ctx.data.split(":", 2)
+        state_manager.set(ctx.bot_id, ctx.user_id, "user:editpage:text",
+                          {"bot_id": int(bot_id), "page": name})
+        ctx.answer_callback()
+        ctx.reply("متن جدید صفحه «{}» را ارسال کنید:".format(name))
+
+    @mother_router.callback("pgD:")
+    def _pgD(ctx):
+        _, bot_id, name = ctx.data.split(":", 2)
+        page_manager.delete_page(int(bot_id), name)
+        ctx.answer_callback("حذف شد")
+        ctx.reply("🗑 صفحه «{}» حذف شد.".format(name))
+
+    @mother_router.callback("pgS:")
+    def _pgS(ctx):
+        _, bot_id, name = ctx.data.split(":", 2)
+        page_manager.set_start_page(int(bot_id), name)
+        ctx.answer_callback("ثبت شد")
+        ctx.reply("⭐ صفحه شروع «{}» شد.".format(name))
+
+    # --------------------------------------------------------
+    # FLOWS CRUD
+    # --------------------------------------------------------
+    @mother_router.callback("fl:")
+    def _flows_cb(ctx):
+        parts = ctx.data.split(":", 3)
+        action = parts[1]
+        bot_id = int(parts[2])
+        b = _get_bot_for_owner(bot_id, _owner_id(ctx))
+        if not b:
+            ctx.answer_callback("⛔", show_alert=True); return
+        ctx.answer_callback()
+
+        if action == "list":
+            names = flow_manager.list_flows(bot_id)
+            txt = "🌊 Flowهای ربات #{}:\n\n".format(bot_id)
+            txt += "\n".join("• " + n for n in names) if names else "(خالی)"
+            kb = inline([
+                [("➕ Flow جدید", "fl:new:{}".format(bot_id))],
+                [("🗑 حذف Flow", "fl:del:{}".format(bot_id))],
+                [("📥 ورود JSON", "fl:import:{}".format(bot_id))],
+            ])
+            ctx.reply(txt, reply_markup=kb)
+        elif action == "new":
+            state_manager.set(ctx.bot_id, ctx.user_id,
+                              "user:newflow:name", {"bot_id": bot_id})
+            ctx.reply("نام Flow جدید را ارسال کنید (مثلاً register):")
+        elif action == "del":
+            names = flow_manager.list_flows(bot_id)
+            if not names:
+                ctx.reply("Flow ای وجود ندارد."); return
+            ctx.reply("یک Flow برای حذف انتخاب کنید:",
+                      reply_markup=inline([[(n, "flD:{}:{}".format(bot_id, n))] for n in names]))
+        elif action == "import":
+            state_manager.set(ctx.bot_id, ctx.user_id,
+                              "user:newflow:json", {"bot_id": bot_id})
+            ctx.reply(
+                "JSON کامل Flow را ارسال کنید. نمونه:\n"
+                '{"name":"hello","trigger":"/hello","steps":['
+                '{"type":"send_message","text":"سلام"},'
+                '{"type":"finish"}]}'
+            )
+
+    @mother_router.callback("flD:")
+    def _flD(ctx):
+        _, bot_id, name = ctx.data.split(":", 2)
+        flow_manager.delete_flow(int(bot_id), name)
+        ctx.answer_callback("حذف شد")
+        ctx.reply("🗑 Flow «{}» حذف شد.".format(name))
+
+    # --------------------------------------------------------
+    # CHANNEL LOCKS
+    # --------------------------------------------------------
+    @mother_router.callback("cl:")
+    def _cl(ctx):
+        parts = ctx.data.split(":", 3)
+        action = parts[1]
+        if action == "verify":
+            from channel_lock.channel_checker import check_user, prompt_join
+            ok, missing = check_user(ctx.bot_id, ctx.user_id)
+            if ok:
+                ctx.answer_callback("عضویت تایید شد ✅")
+                ctx.reply("ممنون! اکنون می‌توانید ادامه دهید.")
+            else:
+                ctx.answer_callback("هنوز عضو نیستید", show_alert=True)
+                prompt_join(ctx, missing)
+            return
+        bot_id = int(parts[2])
+        b = _get_bot_for_owner(bot_id, _owner_id(ctx))
+        if not b:
+            ctx.answer_callback("⛔", show_alert=True); return
+        ctx.answer_callback()
+        if action == "list":
+            locks = channel_checker.list_channels(bot_id)
+            txt = "🔒 کانال‌های اجباری ربات #{}:\n\n".format(bot_id)
+            txt += "\n".join("• {} ({})".format(l["title"], l["channel_id"])
+                             for l in locks) if locks else "(خالی)"
+            kb = inline([
+                [("➕ افزودن کانال", "cl:add:{}".format(bot_id))],
+                [("🗑 حذف کانال", "cl:rm:{}".format(bot_id))],
+            ])
+            ctx.reply(txt, reply_markup=kb)
+        elif action == "add":
+            state_manager.set(ctx.bot_id, ctx.user_id,
+                              "user:lock:add", {"bot_id": bot_id})
+            ctx.reply("یوزرنیم کانال را با @ ارسال کنید.\n"
+                      "ربات باید در آن کانال ادمین باشد.")
+        elif action == "rm":
+            locks = channel_checker.list_channels(bot_id)
+            if not locks:
+                ctx.reply("کانالی ثبت نشده."); return
+            rows = [[("❌ " + l["title"], "clR:{}:{}".format(bot_id, l["id"]))]
+                    for l in locks]
+            ctx.reply("کانال مورد نظر را برای حذف انتخاب کنید:",
+                      reply_markup=inline(rows))
+
+    @mother_router.callback("clR:")
+    def _clR(ctx):
+        _, bot_id, lock_id = ctx.data.split(":", 2)
+        channel_checker.remove_channel(int(lock_id))
+        ctx.answer_callback("حذف شد")
+        ctx.reply("🗑 کانال حذف شد.")
+
+    # --------------------------------------------------------
+    # FSM handlers
+    # --------------------------------------------------------
+    @text_input_bus.on("user:newbot:token")
+    def _on_newbot_token(ctx):
+        data = state_manager.get_data(ctx.bot_id, ctx.user_id)
+        token = (ctx.text or "").strip()
+        # quick token shape validation
+        if ":" not in token or len(token) < 20:
+            ctx.reply(
+                "❌ این توکن صحیح به نظر نمی‌رسد.\n\n"
+                "🔑 توکن باید شبیه این باشد:\n"
+                "<code>123456789:AbCdEfGhIjKlMnOp...</code>\n\n"
+                "لطفاً مجدد ارسال کنید یا /cancel",
+                parse_mode="HTML",
+            )
+            return
+        try:
+            api = BaleAPI(token)
+            me = api.get_me()
+        except Exception as e:
+            ctx.reply(
+                "❌ توکن نامعتبر است یا ربات حذف شده.\n\n"
+                "خطا: {}\n\n"
+                "مطمئن شوید کل توکن را کپی کرده‌اید و در @botfather هم رباتتان فعال است.\n"
+                "/cancel برای انصراف".format(str(e)[:200])
+            )
+            return
+        exists = db.fetchone("SELECT id FROM bots WHERE token=?", (token,))
+        if exists:
+            ctx.reply(
+                "⚠️ این ربات قبلاً در سیستم ثبت شده است.\n"
+                "از منوی «🗂 ربات‌های من» آن را پیدا کنید.",
+                reply_markup=USER_MAIN_KB,
+            )
+            state_manager.clear(ctx.bot_id, ctx.user_id)
+            return
+
+        tpl_key = data.get("template")
+        tpl_row = template_registry.db_row(tpl_key) if tpl_key else None
+        tpl_id  = tpl_row["id"] if tpl_row else None
+
+        bot_id = db.insert(
+            """INSERT INTO bots
+                  (owner_id, token, bot_username, display_name,
+                   template_id, status, settings_json)
+               VALUES (?, ?, ?, ?, ?, 'active', '{}')""",
+            (_owner_id(ctx), token, me.get("username"),
+             me.get("first_name") or me.get("username"), tpl_id),
+        )
+        if tpl_key:
+            tpl = template_registry.get(tpl_key)
+            if tpl:
+                try:
+                    tpl.apply(bot_id)
+                except Exception as e:
+                    ctx.reply("⚠️ خطا در اعمال Template: {}".format(e))
+        bot_manager.start_child(db.fetchone("SELECT * FROM bots WHERE id=?", (bot_id,)))
+        state_manager.clear(ctx.bot_id, ctx.user_id)
+
+        success = (
+            "🎉 <b>تبریک! ربات شما با موفقیت ساخته شد</b>\n\n"
+            "🤖 ربات: @{u}\n"
+            "🆔 شناسه: #{id}\n"
+        ).format(u=me.get("username"), id=bot_id)
+        if tpl_key and template_registry.get(tpl_key):
+            success += "🎁 Template «{}» اعمال شد.\n".format(
+                template_registry.get(tpl_key).name
+            )
+        success += (
+            "\n👇 می‌توانید با ارسال /start به @{u} ربات خود را تست کنید.\n"
+            "🔧 یا از «🗂 ربات‌های من» تنظیمات بیشتر را انجام دهید."
+        ).format(u=me.get("username"))
+        ctx.reply(success, reply_markup=USER_MAIN_KB, parse_mode="HTML")
+
+    @text_input_bus.on("user:newpage:name")
+    def _on_newpage_name(ctx):
+        data = state_manager.get_data(ctx.bot_id, ctx.user_id)
+        try:
+            page_manager.create_page(int(data["bot_id"]), (ctx.text or "").strip(), text="...")
+        except Exception as e:
+            ctx.reply("❌ خطا: {}".format(e)); return
+        state_manager.clear(ctx.bot_id, ctx.user_id)
+        ctx.reply("✅ صفحه «{}» ساخته شد.".format((ctx.text or "").strip()))
+
+    @text_input_bus.on("user:editpage:text")
+    def _on_editpage_text(ctx):
+        data = state_manager.get_data(ctx.bot_id, ctx.user_id)
+        page_manager.update_page(int(data["bot_id"]), data["page"], text=ctx.text or "")
+        state_manager.clear(ctx.bot_id, ctx.user_id)
+        ctx.reply("✅ متن صفحه «{}» به‌روزرسانی شد.".format(data["page"]))
+
+    @text_input_bus.on("user:newflow:name")
+    def _on_newflow_name(ctx):
+        data = state_manager.get_data(ctx.bot_id, ctx.user_id)
+        state_manager.set(ctx.bot_id, ctx.user_id, "user:newflow:trigger",
+                          {"bot_id": int(data["bot_id"]), "name": (ctx.text or "").strip()})
+        ctx.reply("trigger این Flow چیست؟ (مثلاً /register یا متن دکمه. خالی بفرستید با - )")
+
+    @text_input_bus.on("user:newflow:trigger")
+    def _on_newflow_trigger(ctx):
+        data = state_manager.get_data(ctx.bot_id, ctx.user_id)
+        trigger = "" if (ctx.text or "").strip() == "-" else (ctx.text or "").strip()
+        state_manager.set(ctx.bot_id, ctx.user_id, "user:newflow:steps",
+                          {**data, "trigger": trigger})
+        ctx.reply(
+            "حالا JSON لیست steps را ارسال کنید. مثال:\n"
+            '[{"type":"send_message","text":"سلام"},'
+            '{"type":"ask_text","var":"name","prompt":"نامتان؟"},'
+            '{"type":"send_message","text":"سلام {name}"},'
+            '{"type":"finish"}]'
+        )
+
+    @text_input_bus.on("user:newflow:steps")
+    def _on_newflow_steps(ctx):
+        data = state_manager.get_data(ctx.bot_id, ctx.user_id)
+        try:
+            steps = json.loads(ctx.text or "")
+            if not isinstance(steps, list):
+                raise ValueError("لیست نیست")
+            flow_manager.create_flow(int(data["bot_id"]), data["name"], steps,
+                                     trigger=data.get("trigger") or None)
+        except Exception as e:
+            ctx.reply("❌ خطای JSON: {}\nدوباره بفرستید یا /cancel".format(e)); return
+        state_manager.clear(ctx.bot_id, ctx.user_id)
+        ctx.reply("✅ Flow «{}» ساخته شد.".format(data["name"]))
+
+    @text_input_bus.on("user:newflow:json")
+    def _on_newflow_json(ctx):
+        data = state_manager.get_data(ctx.bot_id, ctx.user_id)
+        try:
+            obj = json.loads(ctx.text or "")
+            flow_manager.create_flow(int(data["bot_id"]), obj["name"], obj["steps"],
+                                     trigger=obj.get("trigger"))
+        except Exception as e:
+            ctx.reply("❌ JSON نامعتبر: {}".format(e)); return
+        state_manager.clear(ctx.bot_id, ctx.user_id)
+        ctx.reply("✅ Flow وارد شد.")
+
+    @text_input_bus.on("user:lock:add")
+    def _on_lock_add(ctx):
+        data = state_manager.get_data(ctx.bot_id, ctx.user_id)
+        ch = (ctx.text or "").strip()
+        if not ch.startswith("@"):
+            ctx.reply("یوزرنیم باید با @ شروع شود."); return
+        channel_checker.add_channel(int(data["bot_id"]), ch, title=ch.lstrip("@"))
+        state_manager.clear(ctx.bot_id, ctx.user_id)
+        ctx.reply("✅ کانال اضافه شد.")
+
+    # --------------------------------------------------------
+    # Misc
+    # --------------------------------------------------------
+    @mother_router.text(BTN_INVITE)
+    def _invite(ctx):
+        from reseller.affiliate_manager import make_ref_code, count_referrals
+        code = make_ref_code(_owner_id(ctx))
+        ctx.reply(
+            "🎯 دعوت دوستان\n\n"
+            "کد شما: <code>{c}</code>\n"
+            "دوستان شما با /start {c} عضو شوند.\n"
+            "تعداد دعوت‌شدگان: {n}".format(c=code, n=count_referrals(_owner_id(ctx))),
+            parse_mode="HTML",
+        )
+
+    @mother_router.text(BTN_SUPPORT)
+    def _support(ctx):
+        row = db.fetchone("SELECT value FROM system_settings WHERE key='support_contact'")
+        contact = row["value"] if row else "@support"
+        ctx.reply("📞 پشتیبانی: {}".format(contact))
+
+    @mother_router.text(BTN_HELP)
+    def _help(ctx):
+        ctx.reply(
+            "❓ <b>راهنمای ربات‌ساز بله</b>\n\n"
+            "🎁 «ساخت ربات از Template» — سریع‌ترین راه. ربات‌های آماده با چند کلیک.\n"
+            "🤖 «ساخت ربات» — ربات خالی برای طراحی دستی (Wizard مرحله‌به‌مرحله).\n"
+            "🗂 «ربات‌های من» — مدیریت همه ربات‌های ساخته‌شده.\n"
+            "💰 «کیف پول» — شارژ و مشاهده تراکنش‌ها.\n"
+            "📦 «پلن‌ها» — خرید پلن اشتراک.\n"
+            "🎁 «ثبت کد هدیه» — استفاده از کدهای هدیه.\n"
+            "🎯 «دعوت دوستان» — کسب درآمد از معرفی.\n\n"
+            "💡 نکته: همه چیز با دکمه‌هاست، نیاز به دستور ندارید.\n"
+            "🆘 برای کمک، با پشتیبانی تماس بگیرید.",
+            parse_mode="HTML",
+        )
