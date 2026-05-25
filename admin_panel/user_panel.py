@@ -42,14 +42,7 @@ BTN_INVITE           = "🎯 دعوت دوستان"
 BTN_GIFT             = "🎁 ثبت کد هدیه"
 BTN_SUPPORT          = "📞 پشتیبانی"
 BTN_HELP             = "❓ راهنما"
-
-USER_MAIN_KB = reply_keyboard([
-    [BTN_NEW_BOT],
-    [BTN_MY_BOTS],
-    [BTN_WALLET, BTN_MY_SUBS],
-    [BTN_INVITE, BTN_GIFT],
-    [BTN_SUPPORT, BTN_HELP],
-])
+BTN_RESELLER         = "🧑‍💼 نمایندگی"
 
 
 def _is_referral_enabled() -> bool:
@@ -59,13 +52,21 @@ def _is_referral_enabled() -> bool:
 
 def get_user_main_kb():
     if _is_referral_enabled():
-        return USER_MAIN_KB
+        return reply_keyboard([
+            [BTN_NEW_BOT],
+            [BTN_MY_BOTS],
+            [BTN_WALLET, BTN_MY_SUBS],
+            [BTN_INVITE, BTN_GIFT],
+            [BTN_RESELLER, BTN_SUPPORT],
+            [BTN_HELP],
+        ])
     return reply_keyboard([
         [BTN_NEW_BOT],
         [BTN_MY_BOTS],
         [BTN_WALLET, BTN_MY_SUBS],
         [BTN_GIFT],
-        [BTN_SUPPORT, BTN_HELP],
+        [BTN_RESELLER, BTN_SUPPORT],
+        [BTN_HELP],
     ])
 
 
@@ -98,14 +99,11 @@ def _payment_methods_kb(prefix: str, amount: int, extra_args: str = "",
     methods = list_enabled_methods()
     wallet_bal = get_balance(user_id) if user_id else 0
     rows = []
-    for m in methods:
-        if m["key"] == "wallet":
-            if wallet_bal >= amount:
-                label = "💰 کیف پول ({})".format(_money(wallet_bal))
-                rows.append([(label, "{}:{}:wallet:{}".format(prefix, extra_args, amount))
-                             if extra_args
-                             else (label, "{}:wallet:{}".format(prefix, amount))])
-            break
+    # Wallet first if enough balance
+    if wallet_bal >= amount:
+        label = "💰 کیف پول ({})".format(_money(wallet_bal))
+        cb = "{}:{}:wallet:{}".format(prefix, extra_args, amount) if extra_args else "{}:wallet:{}".format(prefix, amount)
+        rows.append([(label, cb)])
     for m in methods:
         if m["key"] == "wallet":
             continue
@@ -143,7 +141,7 @@ def setup():
     def _cancel_cb(ctx):
         state_manager.clear(ctx.bot_id, ctx.user_id)
         ctx.answer_callback("لغو شد")
-        ctx.reply("منوی اصلی:", reply_markup=get_user_main_kb())
+        ctx.edit("منوی اصلی:", reply_markup=get_user_main_kb())
 
     # ========================================================
     # WALLET
@@ -175,32 +173,32 @@ def setup():
         if action == "refresh":
             _wallet_btn(ctx)
         elif action == "start":
-            ctx.reply("💳 مبلغ شارژ:", reply_markup=inline([
-                [("50,000", "wt:amt:50000")],
-                [("100,000", "wt:amt:100000")],
-                [("200,000", "wt:amt:200000")],
-                [("500,000", "wt:amt:500000")],
+            ctx.edit("💳 مبلغ شارژ:", reply_markup=inline([
+                [("۵۰,۰۰۰", "wt:amt:50000")],
+                [("۱۰۰,۰۰۰", "wt:amt:100000")],
+                [("۲۰۰,۰۰۰", "wt:amt:200000")],
+                [("۵۰۰,۰۰۰", "wt:amt:500000")],
                 [("✏️ دلخواه", "wt:custom:0")],
                 [("🔙", "wt:refresh:0")],
             ]))
         elif action == "custom":
             state_manager.set(ctx.bot_id, ctx.user_id, "user:wallet:topup", {})
-            ctx.reply("✏️ مبلغ (ریال):\n/cancel")
+            ctx.edit("✏️ مبلغ (ریال):\n/cancel")
         elif action in ("amt", "quick"):
             _show_topup(ctx, int(parts[2]))
         elif action == "gift":
             state_manager.set(ctx.bot_id, ctx.user_id, "user:gift:code", {})
-            ctx.reply("🎁 کد هدیه:\n/cancel")
+            ctx.edit("🎁 کد هدیه:\n/cancel")
         elif action == "pay":
             _do_topup(ctx, parts[2], int(parts[3]))
 
     def _show_topup(ctx, amount):
         methods = [m for m in list_enabled_methods() if m["key"] != "wallet"]
         if not methods:
-            ctx.reply("❌ روش پرداختی فعال نیست."); return
+            ctx.edit("❌ روش پرداختی فعال نیست."); return
         rows = [[(m["name"], "wt:pay:{}:{}".format(m["key"], amount))] for m in methods]
         rows.append([("🔙", "wt:refresh:0")])
-        ctx.reply("💳 {} — روش پرداخت:".format(_money(amount)), reply_markup=inline(rows))
+        ctx.edit("💳 {} — روش پرداخت:".format(_money(amount)), reply_markup=inline(rows))
 
     def _do_topup(ctx, method, amount):
         p = start_wallet_topup(_owner_id(ctx), amount, method)
@@ -208,13 +206,13 @@ def setup():
             from payments.card_to_card import get_card_text
             state_manager.set(ctx.bot_id, ctx.user_id, "user:c2c:photo",
                               {"payment_id": p["id"]})
-            ctx.reply("🧾 #{}\n\n{}".format(p["id"], get_card_text()), parse_mode="HTML")
+            ctx.edit("🧾 #{}\n\n{}".format(p["id"], get_card_text()), parse_mode="HTML")
         elif method == "online":
             from payments.online_gateway import request_payment
             r = request_payment(amount, "شارژ کیف پول")
-            ctx.reply("🔗 {}\n\n#{}".format(r["redirect_url"], p["id"]))
+            ctx.edit("🔗 {}\n\n#{}".format(r["redirect_url"], p["id"]))
         elif method == "bale":
-            ctx.reply("💳 بله #{} ثبت شد.".format(p["id"]))
+            ctx.edit("💳 بله #{} ثبت شد.".format(p["id"]))
 
     @text_input_bus.on("user:wallet:topup")
     def _on_custom_amt(ctx):
@@ -263,187 +261,22 @@ def setup():
                 "🎟 <b>اشتراک‌های من</b>\n\n"
                 "🔘 طرح: <b>{}</b>\n\n"
                 "شما اشتراک فعالی ندارید.".format(tier_label),
-                parse_mode="HTML")
+                parse_mode="HTML", reply_markup=get_user_main_kb())
             return
 
-        text = "🎟 <b>اشتراک‌های من</b>\n\n🔑 طرح: <b>{}</b>\n\n".format(tier_label)
+        text = "🎟 <b>اشتراک‌های من</b>\n\n🔘 طرح: {}\n\n".format(tier_label)
         for s in active:
             plan = get_plan(s["plan_id"])
-            pn = plan["name"] if plan else "?"
-            try:
-                from datetime import datetime
-                ends = datetime.strptime(s["ends_at"], "%Y-%m-%d %H:%M:%S")
-                rem = (ends - datetime.utcnow()).days
-                rem_text = "{} روز مانده".format(rem) if rem > 0 else "در حال اتمام"
-            except Exception:
-                rem_text = "-"
-            text += "✅ <b>{}</b>\n   📅 {}\n\n".format(pn, rem_text)
-
-        ctx.reply(text, parse_mode="HTML")
-
-    # ========================================================
-    # CREATE BOT — template only
-    # ========================================================
-    @mother_router.text(BTN_NEW_BOT)
-    def _new_bot(ctx):
-        tpls = template_registry.list_published_templates()
-        if not tpls:
-            ctx.reply("⚠️ فعلاً قالبی در دسترس نیست.")
-            return
-
-        text = (
-            "🤖 <b>ساخت ربات</b>\n\n"
-            "یک نوع ربات انتخاب کنید:\n\n"
-        )
-        kb = []
-        for t in tpls:
-            meta = template_registry.get(t["key"])
-            if not meta:
-                continue
-            plans = template_registry.list_plans_for_template(t["key"])
-            cheapest = min((p["price"] for p in plans), default=0)
-            label = "{} {} — از {}".format(meta.icon, meta.name, _money(cheapest))
-            kb.append([(label, "tpl:open:{}".format(t["key"]))])
-
-        ctx.reply(text, reply_markup=inline(kb), parse_mode="HTML")
-
-    @mother_router.callback("tpl:")
-    def _tpl_cb(ctx):
-        parts = ctx.data.split(":", 3)
-        action = parts[1]
-        ctx.answer_callback()
-
-        if action == "open" and len(parts) >= 3:
-            key = parts[2]
-            meta = template_registry.get(key)
-            if not meta:
-                ctx.reply("یافت نشد."); return
-            plans = template_registry.list_plans_for_template(key)
-
-            text = (
-                "{} <b>{}</b>\n"
-                "{}\n\n"
-                "📦 پلن‌ها:\n"
-            ).format(meta.icon, meta.name, meta.description)
-
-            kb = []
-            for p in plans:
-                tag = "⭐" if int(p["price"]) > 0 else "🆓"
-                text += "{} {} — {} روز — <b>{}</b>\n".format(
-                    tag, p["name"], p["duration_days"], _money(p["price"]))
-                kb.append([(p["name"], "tpl:plan:{}:{}".format(key, p["id"]))])
-            kb.append([("🔙 بازگشت", "tpl:list:0")])
-            ctx.reply(text, reply_markup=inline(kb), parse_mode="HTML")
-            return
-
-        if action == "list":
-            _new_bot(ctx); return
-
-        if action == "plan" and len(parts) >= 4:
-            tpl_key, plan_id = parts[2], int(parts[3])
-            p = get_plan(plan_id)
-            meta = template_registry.get(tpl_key)
-            if not p or not meta:
-                ctx.reply("پلن یافت نشد."); return
-
-            # Check subscription
-            chk = check_can_create_bot(_owner_id(ctx))
-            if not chk["ok"]:
-                ctx.reply(chk["message"])
-                return
-
-            state_manager.set(ctx.bot_id, ctx.user_id, "user:tpl:choice",
-                              {"tpl_key": tpl_key, "plan_id": plan_id})
-
-            text = (
-                "{} <b>{}</b> — {}\n\n"
-                "⏱ {} روز\n"
-                "💰 <b>{}</b>\n\n"
-                "👇 روش پرداخت:"
-            ).format(meta.icon, meta.name, p["name"],
-                     p["duration_days"], _money(p["price"]))
-
-            kb = _payment_methods_kb("tpl:pay", int(p["price"]),
-                                     extra_args="{}_{}".format(tpl_key, plan_id),
-                                     user_id=_owner_id(ctx))
-            ctx.reply(text, reply_markup=inline(kb), parse_mode="HTML")
-            return
-
-        if action == "pay" and len(parts) >= 4:
-            tpl_plan, method = parts[2], parts[3].split(":")[0]
-            try:
-                tpl_key, plan_id = tpl_plan.rsplit("_", 1)
-                plan_id = int(plan_id)
-            except Exception:
-                ctx.reply("خطا."); return
-            p = get_plan(plan_id)
-            if not p:
-                return
-
-            try:
-                payment = start_subscription_purchase(
-                    _owner_id(ctx), plan_id, int(p["price"]), method,
-                    meta={"tpl_key": tpl_key})
-            except ValueError as e:
-                if "insufficient" in str(e):
-                    shortage = wallet_gateway.shortage(_owner_id(ctx), int(p["price"]))
-                    ctx.reply("❌ موجودی کافی نیست.\n💸 کسری: {}".format(_money(shortage)),
-                              reply_markup=inline([
-                                  [("💼 شارژ سریع", "wt:quick:{}".format(shortage))],
-                                  [("🔙", "tpl:plan:{}:{}".format(tpl_key, plan_id))]]))
-                else:
-                    ctx.reply("❌ {}".format(e))
-                return
-
-            if method == "wallet":
-                ctx.reply("✅ پرداخت انجام شد.\n🎟 فعال شد.\n\n🔑 توکن ربات را آماده کنید 👇")
-                _ask_token(ctx, tpl_key)
-                return
-
-            if method == "card_to_card":
-                from payments.card_to_card import get_card_text
-                state_manager.set(ctx.bot_id, ctx.user_id, "user:c2c:photo",
-                                  {"payment_id": payment["id"]})
-                ctx.reply(
-                    "🧾 #{}\n\n{}\n\n"
-                    "💡 پس از تأیید، دکمه «ساخت ربات» در پیام تأیید نمایش داده می‌شود."
-                    .format(payment["id"], get_card_text()), parse_mode="HTML")
-                state_manager.update_data(ctx.bot_id, ctx.user_id, pending_template=tpl_key)
-                return
-
-            if method == "online":
-                from payments.online_gateway import request_payment
-                r = request_payment(int(p["price"]), meta.name)
-                ctx.reply("🔗 {}\n\n💡 پس از تأیید، ربات ساخته می‌شود.".format(r["redirect_url"]))
-                state_manager.update_data(ctx.bot_id, ctx.user_id, pending_template=tpl_key)
-                return
-
-            if method == "bale":
-                ctx.reply("💳 بله #{} ثبت شد.\n💡 پس از تأیید، ربات ساخته می‌شود.".format(payment["id"]))
-                state_manager.update_data(ctx.bot_id, ctx.user_id, pending_template=tpl_key)
-                return
-
-    def _ask_token(ctx, tpl_key):
-        """Ask user for bot token."""
-        state_manager.set(ctx.bot_id, ctx.user_id, "user:newbot:token",
-                          {"template": tpl_key})
-        ctx.reply(
-            "🔑 <b>توکن ربات خود را بفرستید</b>\n\n"
-            "ابتدا در @botfather ربات بسازید.\n"
-            "سپس توکن را اینجا بفرستید.\n\n"
-            "💡 توکن شبیه:\n"
-            "<code>123456789:AbCdEf...</code>\n\n"
-            "/cancel",
-            parse_mode="HTML", reply_markup=remove_keyboard())
+            pname = plan["name"] if plan else "?"
+            text += "• <b>{}</b>\n".format(pname)
+            text += "  🆔 #{} | شروع: {} | پایان: {}\n".format(
+                s["id"], s["starts_at"][:10], s["ends_at"][:10])
+        text += "\nبرای خرید اشتراک جدید از «🤖 ساخت ربات» استفاده کنید."
+        ctx.reply(text, parse_mode="HTML", reply_markup=get_user_main_kb())
 
     # --------------------------------------------------------
-    # GIFT / RECEIPT
+    # GIFT commands
     # --------------------------------------------------------
-    @mother_router.text(BTN_GIFT)
-    def _gift_btn(ctx):
-        state_manager.set(ctx.bot_id, ctx.user_id, "user:gift:code", {})
-        ctx.reply("🎁 کد هدیه:\n/cancel")
-
     @mother_router.command("gift")
     def _gift_cmd(ctx):
         parts = (ctx.text or "").split()
@@ -510,7 +343,7 @@ def setup():
                 [("🗑 حذف", "mb:delete:{}".format(bot_id))],
                 [("🔙 بازگشت", "mb:list:0")],
             ])
-            ctx.reply(text, reply_markup=kb, parse_mode="HTML")
+            ctx.edit(text, reply_markup=kb, parse_mode="HTML")
 
         elif action == "list":
             ctx.answer_callback()
@@ -520,7 +353,7 @@ def setup():
             ctx.answer_callback("حذف")
             bot_manager.stop_bot(b["id"])
             db.execute("DELETE FROM bots WHERE id=?", (b["id"],))
-            ctx.reply("🗑 ربات حذف شد.", reply_markup=get_user_main_kb())
+            ctx.edit("🗑 ربات حذف شد.", reply_markup=get_user_main_kb())
 
         elif action == "pause":
             new = "paused" if b["status"] == "active" else "active"
@@ -531,6 +364,173 @@ def setup():
                 bot_manager.start_child(_get_bot_for_owner(b["id"], _owner_id(ctx)))
             ctx.answer_callback("OK")
             _my_bots(ctx)
+
+    # ========================================================
+    # CREATE BOT — template only
+    # ========================================================
+    @mother_router.text(BTN_NEW_BOT)
+    def _new_bot(ctx):
+        tpls = template_registry.list_published_templates()
+        if not tpls:
+            ctx.reply("⚠️ فعلاً قالبی در دسترس نیست.")
+            return
+
+        text = "🤖 <b>ساخت ربات</b>\n\nیک نوع ربات انتخاب کنید:\n\n"
+        kb = []
+        for t in tpls:
+            meta = template_registry.get(t["key"])
+            if not meta:
+                continue
+            plans = template_registry.list_plans_for_template(t["key"])
+            cheapest = min((p["price"] for p in plans), default=0)
+            label = "{} {} — از {}".format(meta.icon, meta.name, _money(cheapest))
+            kb.append([(label, "tpl:open:{}".format(t["key"]))])
+
+        ctx.reply(text, reply_markup=inline(kb), parse_mode="HTML")
+
+    @mother_router.callback("tpl:")
+    def _tpl_cb(ctx):
+        parts = ctx.data.split(":", 3)
+        action = parts[1]
+        ctx.answer_callback()
+
+        if action == "open" and len(parts) >= 3:
+            key = parts[2]
+            meta = template_registry.get(key)
+            if not meta:
+                ctx.edit("یافت نشد."); return
+            plans = template_registry.list_plans_for_template(key)
+
+            text = (
+                "{} <b>{}</b>\n"
+                "{}\n\n"
+                "📦 <b>پلن‌ها:</b>"
+            ).format(meta.icon, meta.name, meta.description)
+
+            kb = []
+            for p in plans:
+                price_str = "🆓 رایگان" if int(p["price"]) == 0 else _money(p["price"])
+                label = "{} {} — {} روز — {}".format(
+                    "⭐" if int(p["price"]) > 0 else "🆓",
+                    p["name"], p["duration_days"], price_str)
+                kb.append([(label, "tpl:plan:{}:{}".format(key, p["id"]))])
+            kb.append([("🔙 بازگشت", "tpl:list:0")])
+            ctx.edit(text, reply_markup=inline(kb), parse_mode="HTML")
+            return
+
+        if action == "list":
+            _new_bot(ctx); return
+
+        if action == "plan" and len(parts) >= 4:
+            tpl_key, plan_id = parts[2], int(parts[3])
+            p = get_plan(plan_id)
+            meta = template_registry.get(tpl_key)
+            if not p or not meta:
+                ctx.edit("پلن یافت نشد."); return
+
+            # Check subscription
+            chk = check_can_create_bot(_owner_id(ctx))
+            if not chk["ok"] and chk["reason"] != "no_subscription":
+                ctx.edit(chk["message"], reply_markup=inline([
+                    [("🔙 بازگشت به پلن‌ها", "tpl:open:{}".format(tpl_key))],
+                ]))
+                return
+
+            state_manager.set(ctx.bot_id, ctx.user_id, "user:tpl:choice",
+                              {"tpl_key": tpl_key, "plan_id": plan_id})
+
+            price_str = "🆓 رایگان" if int(p["price"]) == 0 else _money(p["price"])
+            text = (
+                "{} <b>{}</b> — {}\n\n"
+                "⏱ {} روز\n"
+                "💰 <b>{}</b>\n\n"
+                "👇 روش پرداخت:"
+            ).format(meta.icon, meta.name, p["name"],
+                     p["duration_days"], price_str)
+
+            kb = _payment_methods_kb("tpl:pay", int(p["price"]),
+                                     extra_args="{}_{}".format(tpl_key, plan_id),
+                                     user_id=_owner_id(ctx))
+            ctx.edit(text, reply_markup=inline(kb), parse_mode="HTML")
+            return
+
+        if action == "pay" and len(parts) >= 4:
+            tpl_plan, method = parts[2], parts[3].split(":")[0]
+            try:
+                tpl_key, plan_id = tpl_plan.rsplit("_", 1)
+                plan_id = int(plan_id)
+            except Exception:
+                ctx.edit("خطا."); return
+            p = get_plan(plan_id)
+            if not p:
+                return
+
+            # Free plan — skip payment, activate immediately
+            if int(p["price"]) == 0:
+                from subscriptions.subscription_manager import activate
+                try:
+                    activate(_owner_id(ctx), plan_id)
+                except Exception:
+                    pass
+                ctx.edit("✅ پلن رایگان فعال شد.\n\n🔑 توکن ربات را آماده کنید 👇")
+                _ask_token(ctx, tpl_key)
+                return
+
+            try:
+                payment = start_subscription_purchase(
+                    _owner_id(ctx), plan_id, int(p["price"]), method,
+                    meta={"tpl_key": tpl_key})
+            except ValueError as e:
+                if "insufficient" in str(e):
+                    shortage = wallet_gateway.shortage(_owner_id(ctx), int(p["price"]))
+                    ctx.edit("❌ موجودی کافی نیست.\n💸 کسری: {}".format(_money(shortage)),
+                              reply_markup=inline([
+                                  [("💼 شارژ سریع", "wt:quick:{}".format(shortage))],
+                                  [("🔙", "tpl:plan:{}:{}".format(tpl_key, plan_id))]]))
+                else:
+                    ctx.edit("❌ {}".format(e))
+                return
+
+            if method == "wallet":
+                ctx.edit("✅ پرداخت انجام شد.\n🎟 اشتراک فعال شد.\n\n🔑 توکن ربات را آماده کنید 👇")
+                _ask_token(ctx, tpl_key)
+                return
+
+            if method == "card_to_card":
+                from payments.card_to_card import get_card_text
+                state_manager.set(ctx.bot_id, ctx.user_id, "user:c2c:photo",
+                                  {"payment_id": payment["id"]})
+                ctx.edit(
+                    "🧾 #{}\n\n{}\n\n"
+                    "💡 پس از تأیید، دکمه «ساخت ربات» در پیام تأیید نمایش داده می‌شود."
+                    .format(payment["id"], get_card_text()), parse_mode="HTML")
+                state_manager.update_data(ctx.bot_id, ctx.user_id, pending_template=tpl_key)
+                return
+
+            if method == "online":
+                from payments.online_gateway import request_payment
+                r = request_payment(int(p["price"]), meta.name)
+                ctx.edit("🔗 {}\n\n💡 پس از تأیید، ربات ساخته می‌شود.".format(r["redirect_url"]))
+                state_manager.update_data(ctx.bot_id, ctx.user_id, pending_template=tpl_key)
+                return
+
+            if method == "bale":
+                ctx.edit("💳 بله #{} ثبت شد.\n💡 پس از تأیید، ربات ساخته می‌شود.".format(payment["id"]))
+                state_manager.update_data(ctx.bot_id, ctx.user_id, pending_template=tpl_key)
+                return
+
+    def _ask_token(ctx, tpl_key):
+        """Ask user for bot token."""
+        state_manager.set(ctx.bot_id, ctx.user_id, "user:newbot:token",
+                          {"template": tpl_key})
+        ctx.reply(
+            "🔑 <b>توکن ربات خود را ارسال کنید</b>\n\n"
+            "۱. به @botfather در بله بروید\n"
+            "۲. دستور <code>/newbot</code>\n"
+            "۳. توکن را کپی کنید\n"
+            "۴. همینجا بفرستید\n\n"
+            "/cancel برای انصراف",
+            parse_mode="HTML")
 
     # ========================================================
     # TOKEN HANDLER
@@ -672,6 +672,208 @@ def setup():
             meta = {}
         _ask_token(ctx, meta.get("tpl_key"))
 
+    # ========================================================
+    # RESELLER / AFFILIATE PANEL
+    # ========================================================
+    @mother_router.text(BTN_RESELLER)
+    def _reseller_btn(ctx):
+        from core.permission_manager import get_role, ROLE_RESELLER
+        role = get_role(ctx.user_id)
+        if role == ROLE_RESELLER:
+            _show_reseller_panel(ctx)
+        else:
+            _show_reseller_intro(ctx)
+
+    def _show_reseller_intro(ctx):
+        text = (
+            "🧑‍💼 <b>برنامه همکاری در فروش (نمایندگی)</b>\n\n"
+            "با نمایندگی در ربات‌ساز بله، می‌توانید:\n\n"
+            "✅ از فروش پلن‌ها به کاربران، کمیسیون دریافت کنید\n"
+            "✅ لینک اختصاصی معرفی داشته باشید\n"
+            "✅ آمار دقیق فروش و دعوت‌ها را ببینید\n"
+            "✅ به پنل اختصاصی نمایندگی دسترسی داشته باشید\n\n"
+            "💰 <b>میزان کمیسیون:</b> تا ۲۰٪ از هر فروش\n\n"
+            "👇 برای درخواست نمایندگی، دکمه زیر را بزنید."
+        )
+        kb = inline([
+            [("📩 درخواست نمایندگی", "res_req:send:0")],
+            [("🔙 بازگشت", "cancel:main")],
+        ])
+        ctx.reply(text, reply_markup=kb, parse_mode="HTML")
+
+    @mother_router.callback("res_req:")
+    def _res_req_cb(ctx):
+        ctx.answer_callback()
+        action = ctx.data.split(":")[1]
+        if action == "send":
+            state_manager.set(ctx.bot_id, ctx.user_id, "user:reseller:request", {})
+            ctx.edit(
+                "📩 <b>درخواست نمایندگی</b>\n\n"
+                "لطفاً نام و نام خانوادگی و توضیح مختصری درباره خودتان "
+                "برای بررسی همکاری ارسال کنید:\n\n"
+                "/cancel برای انصراف",
+                parse_mode="HTML")
+
+    @text_input_bus.on("user:reseller:request")
+    def _on_reseller_req(ctx):
+        text = (ctx.text or "").strip()
+        if not text:
+            ctx.reply("❌ لطفاً توضیحات را بنویسید.")
+            return
+        state_manager.clear(ctx.bot_id, ctx.user_id)
+
+        # Save request to system_settings or notify admins
+        from reseller.affiliate_manager import save_reseller_request
+        save_reseller_request(_owner_id(ctx), text)
+
+        from core.notifications import notify_super_admins
+        name = (ctx.from_user or {}).get("first_name", "-")
+        uname = (ctx.from_user or {}).get("username", "-")
+        msg = (
+            "📩 <b>درخواست نمایندگی جدید</b>\n\n"
+            "👤 {n} (@{u})\n"
+            "🆔 {id}\n"
+            "📝 توضیحات:\n{desc}\n\n"
+            "برای تأیید از پنل ادمین استفاده کنید."
+        ).format(n=name, u=uname, id=ctx.user_id, desc=text)
+        notify_super_admins(msg, parse_mode="HTML")
+
+        ctx.reply(
+            "✅ <b>درخواست شما ثبت شد!</b>\n\n"
+            "مدیران در اسرع وقت بررسی می‌کنند.\n"
+            "تا آن زمان می‌توانید از سایر امکانات استفاده کنید.\n\n"
+            "🙏 با تشکر از شما",
+            reply_markup=get_user_main_kb(), parse_mode="HTML")
+
+    def _show_reseller_panel(ctx):
+        from reseller.affiliate_manager import (
+            make_ref_code, count_referrals, list_referrals,
+        )
+        from wallet.wallet_manager import get_balance
+
+        ref_code = make_ref_code(_owner_id(ctx))
+        bal = get_balance(_owner_id(ctx))
+        refs = count_referrals(_owner_id(ctx))
+        stats = get_reseller_stats = None
+        try:
+            from reseller.affiliate_manager import get_reseller_stats as _grs
+            stats = _grs(_owner_id(ctx))
+        except Exception:
+            stats = None
+        recent_refs = list_referrals(_owner_id(ctx), limit=5)
+
+        text = (
+            "🧑‍💼 <b>پنل نمایندگی</b>\n\n"
+            "🔗 <b>کد دعوت:</b> <code>{code}</code>\n"
+            "👥 <b>تعداد دعوت‌شدگان:</b> {n}\n"
+            "💰 <b>موجودی:</b> {bal}\n"
+        ).format(code=ref_code, n=refs, bal=_money(bal))
+
+        if stats:
+            text += "\n📊 <b>آمار عملکرد:</b>\n"
+            text += "• فروش مستقیم: {} مورد\n".format(stats.get("direct_sales", 0))
+            text += "• کمیسیون دریافتی: {}\n".format(_money(stats.get("total_commission", 0)))
+            text += "• دعوت‌های امروز: {}\n".format(stats.get("today_refs", 0))
+            text += "• دعوت‌های این هفته: {}\n".format(stats.get("week_refs", 0))
+
+        if recent_refs:
+            text += "\n📋 آخرین دعوت‌شدگان:\n"
+            for r in recent_refs[:5]:
+                text += "  • {} ({})\n".format(
+                    r.get("first_name") or "-", r["created_at"][:10])
+
+        kb = inline([
+            [("🔄 رفرش آمار", "res_pnl:refresh:0")],
+            [("👥 لیست دعوت‌شدگان", "res_pnl:reflist:0")],
+            [("📊 آمار فروش", "res_pnl:sales:0")],
+            [("🔗 لینک دعوت", "res_pnl:link:0")],
+            [("💳 برداشت کمیسیون", "res_pnl:withdraw:0")],
+            [("🔙 بازگشت", "cancel:main")],
+        ])
+        ctx.reply(text, reply_markup=kb, parse_mode="HTML")
+
+    @mother_router.callback("res_pnl:")
+    def _res_pnl_cb(ctx):
+        from reseller.affiliate_manager import (
+            make_ref_code, count_referrals, list_referrals,
+        )
+        from wallet.wallet_manager import get_balance, list_transactions
+
+        action = ctx.data.split(":")[1]
+        ctx.answer_callback()
+
+        if action == "refresh":
+            _show_reseller_panel(ctx)
+
+        elif action == "reflist":
+            rows = list_referrals(_owner_id(ctx), limit=30)
+            if not rows:
+                ctx.edit("👥 هنوز کسی با کد شما عضو نشده.")
+                return
+            text = "👥 <b>لیست دعوت‌شدگان</b>\n\n"
+            for r in rows:
+                text += "  • {} — {}\n".format(
+                    r.get("first_name") or "-", r["created_at"][:10])
+            ctx.edit(text, reply_markup=inline([
+                [("🔙 بازگشت", "res_pnl:refresh:0")]
+            ]), parse_mode="HTML")
+
+        elif action == "sales":
+            txs = list_transactions(_owner_id(ctx), limit=10)
+            bal = get_balance(_owner_id(ctx))
+            text = "📊 <b>آمار فروش و درآمد</b>\n\n"
+            text += "💰 موجودی: {}\n\n".format(_money(bal))
+            commission_txs = [t for t in txs if t["type"] == "commission"]
+            if commission_txs:
+                text += "📑 آخرین پورسانت‌ها:\n"
+                for t in commission_txs[:5]:
+                    text += "  ➕ {:,} | {}\n".format(abs(t["amount"]), t["created_at"][:10])
+            else:
+                text += "هنوز پورسانتی ثبت نشده است."
+            ctx.edit(text, reply_markup=inline([
+                [("🔙 بازگشت", "res_pnl:refresh:0")]
+            ]), parse_mode="HTML")
+
+        elif action == "link":
+            code = make_ref_code(_owner_id(ctx))
+            link = code
+            mother_api = bot_manager.get_mother_api()
+            if mother_api:
+                try:
+                    me = mother_api.get_me()
+                    link = "https://ble.ir/{}?start={}".format(me.get("username", ""), code)
+                except Exception:
+                    pass
+            ctx.edit(
+                "🔗 <b>لینک دعوت اختصاصی شما</b>\n\n"
+                "<code>{}</code>\n\n"
+                "📱 این لینک را برای دوستانتان بفرستید.\n"
+                "💰 با هر خرید آنها، کمیسیون دریافت می‌کنید.".format(link),
+                reply_markup=inline([
+                    [("🔄 رفرش", "res_pnl:refresh:0")]
+                ]), parse_mode="HTML")
+
+        elif action == "withdraw":
+            bal = get_balance(_owner_id(ctx))
+            if bal <= 0:
+                ctx.edit("❌ موجودی قابل برداشتی ندارید.")
+                return
+            from core.notifications import notify_super_admins
+            notify_super_admins(
+                "💰 <b>درخواست برداشت کمیسیون</b>\n\n"
+                "👤 نماینده #{id}\n"
+                "💰 مبلغ: {bal}\n\n"
+                "برای پرداخت با نماینده هماهنگ کنید.".format(
+                    id=_owner_id(ctx), bal=_money(bal)),
+                parse_mode="HTML")
+            ctx.edit(
+                "✅ <b>درخواست برداشت ثبت شد</b>\n\n"
+                "اطلاعات به مدیر ارسال شد.\n"
+                "به زودی برای برداشت با شما تماس گرفته می‌شود.",
+                reply_markup=inline([
+                    [("🔙 بازگشت", "res_pnl:refresh:0")]
+                ]))
+
     # SUPPORT / HELP
     @mother_router.text(BTN_SUPPORT)
     def _support(ctx):
@@ -686,6 +888,7 @@ def setup():
             "🗂 «ربات‌های من» — مشاهده و مدیریت ربات‌ها\n"
             "💰 «کیف پول» — شارژ و تراکنش‌ها\n"
             "🎟 «اشتراک‌ها» — مشاهده اشتراک‌های فعال\n"
-            "🎯 «دعوت» — کسب درآمد از معرفی\n\n"
+            "🎯 «دعوت» — کسب درآمد از معرفی\n"
+            "🧑‍💼 «نمایندگی» — برنامه همکاری در فروش\n\n"
             "💡 سوال داشتید؟ «📞 پشتیبانی» تماس بگیرید.",
             parse_mode="HTML")
