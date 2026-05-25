@@ -157,51 +157,51 @@ def setup():
             _show_users_page(ctx, int(parts[2]))
         elif action == "search":
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:user:search")
-            ctx.edit("آی‌دی عددی بله را ارسال کنید:")
+            ctx.reply("آی‌دی عددی بله را ارسال کنید:")
         elif action == "open":
             _show_user_detail(ctx, int(parts[2]))
         elif action == "block":
             db.execute("UPDATE users SET is_blocked=1 WHERE id=?", (int(parts[2]),))
-            ctx.edit("🚫 کاربر بلاک شد.")
+            ctx.reply("🚫 کاربر بلاک شد.")
             _show_user_detail(ctx, int(parts[2]))
         elif action == "unblock":
             db.execute("UPDATE users SET is_blocked=0 WHERE id=?", (int(parts[2]),))
-            ctx.edit("✅ کاربر آنبلاک شد.")
+            ctx.reply("✅ کاربر آنبلاک شد.")
             _show_user_detail(ctx, int(parts[2]))
         elif action == "credit":
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:wallet:credit",
                               {"user_id": int(parts[2])})
-            ctx.edit("💰 مبلغ شارژ (ریال) را ارسال کنید:\n/cancel برای انصراف")
+            ctx.reply("💰 مبلغ شارژ (ریال) را ارسال کنید:\n/cancel برای انصراف")
         elif action == "debit":
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:wallet:debit",
                               {"user_id": int(parts[2])})
-            ctx.edit("💸 مبلغ کسر (ریال) را ارسال کنید:\n/cancel برای انصراف")
+            ctx.reply("💸 مبلغ کسر (ریال) را ارسال کنید:\n/cancel برای انصراف")
         elif action == "makeadmin":
             if not _is_super(ctx):
-                ctx.edit("⛔ فقط سوپرادمین.")
+                ctx.reply("⛔ فقط سوپرادمین.")
                 return
             grant_admin(int(parts[2]), role=ROLE_ADMIN)
-            ctx.edit("✅ به ادمین ارتقا یافت.")
+            ctx.reply("✅ به ادمین ارتقا یافت.")
             _show_user_detail(ctx, int(parts[2]))
         elif action == "makereseller":
             if not _is_super(ctx):
-                ctx.edit("⛔ فقط سوپرادمین.")
+                ctx.reply("⛔ فقط سوپرادمین.")
                 return
             grant_admin(int(parts[2]), role=ROLE_RESELLER)
-            ctx.edit("✅ به نماینده ارتقا یافت.")
+            ctx.reply("✅ به نماینده ارتقا یافت.")
             _show_user_detail(ctx, int(parts[2]))
         elif action == "revoke":
             if not _is_super(ctx):
-                ctx.edit("⛔ فقط سوپرادمین.")
+                ctx.reply("⛔ فقط سوپرادمین.")
                 return
             revoke_admin(int(parts[2]))
-            ctx.edit("✅ نقش حذف شد.")
+            ctx.reply("✅ نقش حذف شد.")
             _show_user_detail(ctx, int(parts[2]))
 
     def _show_user_detail(ctx, user_id: int):
         u = db.fetchone("SELECT * FROM users WHERE id=?", (int(user_id),))
         if not u:
-            ctx.edit("کاربر یافت نشد.")
+            ctx.reply("کاربر یافت نشد.")
             return
         bal = get_balance(u["id"])
         bots_count = db.fetchone(
@@ -243,7 +243,7 @@ def setup():
                 kb.append([("❌ حذف نقش", "uadm:revoke:{}".format(u["id"]))])
         kb.append([("🔙 لیست کاربران", "uadm:page:0")])
 
-        ctx.edit(text, reply_markup=inline(kb))
+        ctx.reply(text, reply_markup=inline(kb))
 
     # FSM: search user
     @text_input_bus.on("admin:user:search")
@@ -341,7 +341,7 @@ def setup():
                  ("✅ رفع بن",  "badm:unban:{}".format(b["id"]))],
                 [("🗑 حذف ربات", "badm:delete:{}".format(b["id"]))],
             ])
-            ctx.edit(text, reply_markup=kb)
+            ctx.reply(text, reply_markup=kb)
         elif action == "toggle":
             new = "paused" if b["status"] == "active" else "active"
             db.execute("UPDATE bots SET status=? WHERE id=?", (new, b["id"]))
@@ -350,22 +350,22 @@ def setup():
                 bot_manager.stop_bot(b["id"])
             else:
                 bot_manager.start_child(db.fetchone("SELECT * FROM bots WHERE id=?", (b["id"],)))
-            ctx.edit("✅ وضعیت ربات به {} تغییر کرد.".format(new))
+            ctx.reply("✅ وضعیت ربات به {} تغییر کرد.".format(new))
         elif action == "ban":
             db.execute("UPDATE bots SET status='banned' WHERE id=?", (b["id"],))
             from core.bot_manager import bot_manager
             bot_manager.stop_bot(b["id"])
-            ctx.edit("🚫 ربات بن شد.")
+            ctx.reply("🚫 ربات بن شد.")
         elif action == "unban":
             db.execute("UPDATE bots SET status='active' WHERE id=?", (b["id"],))
             from core.bot_manager import bot_manager
             bot_manager.start_child(db.fetchone("SELECT * FROM bots WHERE id=?", (b["id"],)))
-            ctx.edit("✅ ربات از بن خارج شد.")
+            ctx.reply("✅ ربات از بن خارج شد.")
         elif action == "delete":
             from core.bot_manager import bot_manager
             bot_manager.stop_bot(b["id"])
             db.execute("DELETE FROM bots WHERE id=?", (b["id"],))
-            ctx.edit("🗑 ربات حذف شد.")
+            ctx.reply("🗑 ربات حذف شد.")
 
     # ========================================================
     # PLANS
@@ -406,14 +406,14 @@ def setup():
             _show_plan_detail(ctx, int(parts[2])); return
         if action == "setprice":
             if not _is_super(ctx):
-                ctx.edit("⛔ فقط سوپرادمین."); return
+                ctx.reply("⛔ فقط سوپرادمین."); return
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:plan:setprice",
                               {"plan_id": int(parts[2])})
-            ctx.edit("💰 قیمت جدید (ریال) را ارسال کنید:\n/cancel برای انصراف")
+            ctx.reply("💰 قیمت جدید (ریال) را ارسال کنید:\n/cancel برای انصراف")
             return
         if action == "setlimit":
             if not _is_super(ctx):
-                ctx.edit("⛔ فقط سوپرادمین."); return
+                ctx.reply("⛔ فقط سوپرادمین."); return
             plan_id = int(parts[2])
             p = get_plan(plan_id)
             kb = inline([
@@ -425,18 +425,18 @@ def setup():
                   "padm:setfield:max_monthly_messages:{}".format(plan_id))],
                 [("🔙 بازگشت", "padm:open:{}".format(plan_id))],
             ])
-            ctx.edit("کدام محدودیت را تغییر می‌دهید؟", reply_markup=kb); return
+            ctx.reply("کدام محدودیت را تغییر می‌دهید؟", reply_markup=kb); return
         if action == "setfield" and len(parts) >= 4:
             field = parts[2]
             plan_id = int(parts[3])
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:plan:setfield",
                               {"plan_id": plan_id, "field": field})
-            ctx.edit("مقدار جدید برای «{}» را ارسال کنید:".format(field))
+            ctx.reply("مقدار جدید برای «{}» را ارسال کنید:".format(field))
 
     def _show_plan_detail(ctx, plan_id: int):
         p = get_plan(plan_id)
         if not p:
-            ctx.edit("پلن یافت نشد."); return
+            ctx.reply("پلن یافت نشد."); return
         text = (
             "📦 پلن #{id} - {nm}\n"
             "{desc}\n\n"
@@ -463,7 +463,7 @@ def setup():
                  "padm:toggle:{}".format(p["id"])),
             ])
         kb.append([("🔙 بازگشت", "padm:list:")])
-        ctx.edit(text, reply_markup=inline(kb))
+        ctx.reply(text, reply_markup=inline(kb))
 
     @text_input_bus.on("admin:plan:setprice")
     def _on_plan_setprice(ctx):
@@ -553,11 +553,11 @@ def setup():
             approve(pid)
             pay_commission_for(pid)
             ctx.answer_callback("تایید شد ✅")
-            ctx.edit("✅ پرداخت #{} تایید و تخصیص داده شد.".format(pid))
+            ctx.reply("✅ پرداخت #{} تایید و تخصیص داده شد.".format(pid))
         elif action == "no":
             reject(pid, reason="رد توسط مدیر")
             ctx.answer_callback("رد شد ❌")
-            ctx.edit("❌ پرداخت #{} رد شد.".format(pid))
+            ctx.reply("❌ پرداخت #{} رد شد.".format(pid))
         elif action == "view":
             _show_payment_detail(ctx, pid)
 
@@ -566,7 +566,7 @@ def setup():
         from payments.card_to_card import get_receipt
         p = get_payment(pid)
         if not p:
-            ctx.edit("پرداخت یافت نشد."); return
+            ctx.reply("پرداخت یافت نشد."); return
         u = db.fetchone("SELECT * FROM users WHERE id=?", (p["user_id"],))
         method = get_method(p["method_key"])
         text = (
@@ -605,7 +605,7 @@ def setup():
                 return
             except Exception:
                 pass
-        ctx.edit(text, reply_markup=inline(kb) if kb else None, parse_mode="HTML")
+        ctx.reply(text, reply_markup=inline(kb) if kb else None, parse_mode="HTML")
 
     # ========================================================
     # WALLETS
@@ -665,7 +665,7 @@ def setup():
             _show_gifts(ctx)
         elif action == "new":
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:gift:amount", {})
-            ctx.edit("💰 مبلغ کد هدیه (ریال) را ارسال کنید:\n/cancel برای انصراف")
+            ctx.reply("💰 مبلغ کد هدیه (ریال) را ارسال کنید:\n/cancel برای انصراف")
 
     @text_input_bus.on("admin:gift:amount")
     def _gift_amount(ctx):
@@ -784,13 +784,13 @@ def setup():
             target = parts[2]
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:bc:text",
                               {"target": target})
-            ctx.edit(
+            ctx.reply(
                 "✏️ متن پیام Broadcast را ارسال کنید.\n"
                 "هدف: {}\n\n/cancel برای انصراف".format(target)
             )
         elif action == "cancel":
             state_manager.clear(ctx.bot_id, ctx.user_id)
-            ctx.edit("لغو شد.", reply_markup=ADMIN_KEYBOARD)
+            ctx.reply("لغو شد.", reply_markup=ADMIN_KEYBOARD)
 
     @text_input_bus.on("admin:bc:text")
     def _bc_text(ctx):
@@ -846,16 +846,16 @@ def setup():
         ctx.answer_callback()
         if action == "add":
             if not _is_super(ctx):
-                ctx.edit("⛔ فقط سوپرادمین.")
+                ctx.reply("⛔ فقط سوپرادمین.")
                 return
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:res:add", {})
-            ctx.edit("آی‌دی عددی بله کاربر را ارسال کنید:")
+            ctx.reply("آی‌دی عددی بله کاربر را ارسال کنید:")
         elif action == "percent":
             if not _is_super(ctx):
-                ctx.edit("⛔ فقط سوپرادمین.")
+                ctx.reply("⛔ فقط سوپرادمین.")
                 return
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:res:percent", {})
-            ctx.edit("درصد جدید (0 تا 100) را ارسال کنید:")
+            ctx.reply("درصد جدید (0 تا 100) را ارسال کنید:")
 
     @text_input_bus.on("admin:res:add")
     def _res_add(ctx):
@@ -917,15 +917,15 @@ def setup():
         if action == "edit":
             row = db.fetchone("SELECT * FROM system_settings WHERE id=?", (int(parts[2]),))
             if not row:
-                ctx.edit("یافت نشد."); return
+                ctx.reply("یافت نشد."); return
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:set:edit",
                               {"id": row["id"], "key": row["key"]})
-            ctx.edit("مقدار جدید برای «{}» را ارسال کنید:\n(فعلی: {})".format(
+            ctx.reply("مقدار جدید برای «{}» را ارسال کنید:\n(فعلی: {})".format(
                 row["key"], row["value"] or "-"
             ))
         elif action == "new":
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:set:newkey", {})
-            ctx.edit("نام کلید تنظیم جدید را ارسال کنید:")
+            ctx.reply("نام کلید تنظیم جدید را ارسال کنید:")
 
     @text_input_bus.on("admin:set:edit")
     def _set_edit(ctx):
@@ -979,14 +979,14 @@ def setup():
             _show_referral_config(ctx)
         elif action == "settext":
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:refcfg:text", {})
-            ctx.edit("✏️ متن بنر دعوت را ارسال کنید.\n"
+            ctx.reply("✏️ متن بنر دعوت را ارسال کنید.\n"
                       "از {link} برای جایگذاری لینک دعوت استفاده کنید.\n/cancel برای انصراف")
         elif action == "setphoto":
             state_manager.set(ctx.bot_id, ctx.user_id, "admin:refcfg:photo", {})
-            ctx.edit("🖼 عکس بنر دعوت را ارسال کنید:\n/cancel برای انصراف")
+            ctx.reply("🖼 عکس بنر دعوت را ارسال کنید:\n/cancel برای انصراف")
         elif action == "clearphoto":
             db.execute("UPDATE system_settings SET value='' WHERE key='referral_banner_photo'")
-            ctx.edit("🗑 عکس بنر حذف شد.")
+            ctx.reply("🗑 عکس بنر حذف شد.")
             _show_referral_config(ctx)
 
     def _show_referral_config(ctx):
@@ -1016,7 +1016,7 @@ def setup():
             [("🗑 حذف عکس بنر", "refcfg:clearphoto:0")],
             [("🔙 بازگشت به تنظیمات", "set:view:0")],
         ])
-        ctx.edit(text, reply_markup=kb, parse_mode="HTML")
+        ctx.reply(text, reply_markup=kb, parse_mode="HTML")
 
     @text_input_bus.on("admin:refcfg:text")
     def _on_refcfg_text(ctx):

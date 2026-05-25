@@ -50,24 +50,6 @@ class Context:
             reply_markup=reply_markup, parse_mode=parse_mode,
         )
 
-    def edit(self, text: str, reply_markup: Optional[dict] = None,
-             parse_mode: Optional[str] = None):
-        """Edit the source message (for inline callback) or fall back to reply."""
-        if not self.api or self.chat_id is None:
-            return
-        msg = None
-        if self.callback:
-            msg = self.callback.get("message")
-        if msg and msg.get("message_id"):
-            try:
-                return self.api.edit_message_text(
-                    self.chat_id, msg["message_id"], text,
-                    reply_markup=reply_markup, parse_mode=parse_mode,
-                )
-            except Exception:
-                pass
-        return self.reply(text, reply_markup=reply_markup, parse_mode=parse_mode)
-
     def answer_callback(self, text: Optional[str] = None, show_alert: bool = False):
         if self.callback and self.api:
             self.api.answer_callback_query(self.callback["id"], text=text, show_alert=show_alert)
@@ -169,20 +151,19 @@ def dispatch(bot_id: int, update: Dict[str, Any]):
         # Text message
         if ctx.message and ctx.text:
 
-            # Mid-flow: child-bot flow engine (SKIP for mother bot)
-            if not ctx.is_mother:
-                from flow_engine.step_executor import is_in_flow, resume_flow
-                if ctx.user_id and is_in_flow(bot_id, ctx.user_id):
-                    resume_flow(ctx)
-                    return
+            # Mid-flow: child-bot flow engine
+            from flow_engine.step_executor import is_in_flow, resume_flow
+            if ctx.user_id and is_in_flow(bot_id, ctx.user_id):
+                resume_flow(ctx)
+                return
 
-                # Flow trigger detection
-                from flow_engine.flow_manager import find_flow_by_trigger
-                trig_name = find_flow_by_trigger(bot_id, ctx.text)
-                if trig_name:
-                    from flow_engine.step_executor import start_flow
-                    start_flow(ctx, trig_name)
-                    return
+            # Flow trigger detection
+            from flow_engine.flow_manager import find_flow_by_trigger
+            trig_name = find_flow_by_trigger(bot_id, ctx.text)
+            if trig_name:
+                from flow_engine.step_executor import start_flow
+                start_flow(ctx, trig_name)
+                return
 
             # /command
             if ctx.text.startswith("/"):

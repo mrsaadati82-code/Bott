@@ -111,7 +111,7 @@ def setup():
             key = parts[2]
             row = template_registry.db_row(key)
             if not row:
-                ctx.reply("یافت نشد."); return
+                ctx.edit("یافت نشد."); return
             new_val = 0 if int(row["is_published"]) else 1
             db.execute("UPDATE bot_templates SET is_published=? WHERE id=?",
                        (new_val, row["id"]))
@@ -119,18 +119,18 @@ def setup():
 
         if action == "editprice" and len(parts) >= 3:
             if not is_super_admin(ctx.user_id):
-                ctx.reply("⛔ فقط سوپرادمین قیمت‌ها را تغییر می‌دهد.")
+                ctx.edit("⛔ فقط سوپرادمین قیمت‌ها را تغییر می‌دهد.")
                 return
             plan_id = int(parts[2])
             plan = get_plan(plan_id)
             if not plan:
-                ctx.reply("پلن یافت نشد."); return
+                ctx.edit("پلن یافت نشد."); return
             state_manager.set(
                 ctx.bot_id, ctx.user_id,
                 "admin:tpl:setprice",
                 {"plan_id": plan_id, "tpl_key": _plan_template_key(plan)},
             )
-            ctx.reply(
+            ctx.edit(
                 "🏷 پلن «{}» — قیمت فعلی: {}\n\n"
                 "قیمت جدید (به ریال) را ارسال کنید:\n/cancel برای انصراف"
                 .format(plan["name"], _money(plan["price"]))
@@ -139,11 +139,11 @@ def setup():
 
         if action == "editlimit" and len(parts) >= 3:
             if not is_super_admin(ctx.user_id):
-                ctx.reply("⛔ فقط سوپرادمین."); return
+                ctx.edit("⛔ فقط سوپرادمین."); return
             plan_id = int(parts[2])
             plan = get_plan(plan_id)
             if not plan:
-                ctx.reply("پلن یافت نشد."); return
+                ctx.edit("پلن یافت نشد."); return
             kb = inline([
                 [("max_bots ({})".format(plan["max_bots"]),
                   "tplL:max_bots:{}".format(plan_id))],
@@ -152,7 +152,7 @@ def setup():
                 [("max_monthly_messages ({})".format(plan["max_monthly_messages"]),
                   "tplL:max_monthly_messages:{}".format(plan_id))],
             ])
-            ctx.reply("کدام محدودیت را تغییر می‌دهید؟", reply_markup=kb)
+            ctx.edit("کدام محدودیت را تغییر می‌دهید؟", reply_markup=kb)
             return
 
     @mother_router.callback("tplL:")
@@ -167,7 +167,7 @@ def setup():
             {"plan_id": plan_id, "field": field},
         )
         ctx.answer_callback()
-        ctx.reply("مقدار جدید برای «{}» را ارسال کنید:".format(field))
+        ctx.edit("مقدار جدید برای «{}» را ارسال کنید:".format(field))
 
     # FSM via TextInputBus
     @text_input_bus.on("admin:tpl:setprice")
